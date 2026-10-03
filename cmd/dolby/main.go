@@ -1,7 +1,7 @@
 // Command dolby reads or switches Dolby Audio on Shokz OpenFit 2+ earbuds
 // over Bluetooth RFCOMM from Windows.
 //
-//	dolby [-addr A0:0C:E2:75:63:2F] status|on|off
+//	dolby [-addr A0:0C:E2:75:63:2F] [-trace] status|on|off
 package main
 
 import (
@@ -29,8 +29,9 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("dolby", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	addr := fs.String("addr", "A0:0C:E2:75:63:2F", "earbuds' Bluetooth address")
+	trace := fs.Bool("trace", false, "log every byte sent and received to stderr")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: dolby [-addr XX:XX:XX:XX:XX:XX] status|on|off")
+		fmt.Fprintln(stderr, "usage: dolby [-addr XX:XX:XX:XX:XX:XX] [-trace] status|on|off")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -55,10 +56,23 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	var tr *tracer
+	if *trace {
+		tr = newTracer(stderr)
+		tr.logf("command %q, connecting to %012X", cmd, bt)
+	}
 	conn, err := dial(bt)
 	if err != nil {
+		if tr != nil {
+			tr.logf("connect failed: %v", err)
+		}
 		fmt.Fprintln(stderr, "dolby:", err)
 		return 1
+	}
+	if tr != nil {
+		tr.logf("connected")
+		tr.rw = conn
+		conn = tr
 	}
 	defer conn.Close()
 	c := shokz.NewClient(conn)
