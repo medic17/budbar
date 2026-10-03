@@ -25,10 +25,11 @@ func TestBadInputNeverDials(t *testing.T) {
 		{"ON"},
 		{"status", "extra"},
 		{"-x", "status"},
-		{"-addr", "zz", "status"},
-		{"-addr", "A0:0C:E2:75:63", "status"},
-		{"-addr", "A0:0C:E2:75:63:2F:00", "status"},
-		{"-addr", "", "on"},
+		// There is no way to choose another device.
+		{"-addr", "A0:0C:E2:75:63:2F", "status"},
+		{"-addr", "11:22:33:44:55:66", "on"},
+		{"tray", "extra"},
+		{"install", "extra"},
 	} {
 		var stderr strings.Builder
 		if code := run(args, noDial(t), io.Discard, &stderr); code != 2 {
@@ -138,10 +139,56 @@ func TestTraceLogsConnectFailure(t *testing.T) {
 	}
 }
 
-func TestParseAddr(t *testing.T) {
-	for _, s := range []string{"A0:0C:E2:75:63:2F", "a00ce275632f"} {
-		if v, err := parseAddr(s); err != nil || v != 0xA00CE275632F {
-			t.Errorf("parseAddr(%q) = %x, %v", s, v, err)
+// tray, install and uninstall hand over to their own code without dialing.
+func TestNonDialingCommands(t *testing.T) {
+	var got []string
+	oldTray, oldInstall, oldUninstall := startTray, runInstall, runUninstall
+	defer func() { startTray, runInstall, runUninstall = oldTray, oldInstall, oldUninstall }()
+	startTray = func(dialFunc, io.Writer) int {
+		got = append(got, "tray")
+		return 0
+	}
+	runInstall = func(_, _ io.Writer) int {
+		got = append(got, "install")
+		return 0
+	}
+	runUninstall = func(_, _ io.Writer) int {
+		got = append(got, "uninstall")
+		return 0
+	}
+	for _, args := range [][]string{{"tray"}, {"install"}, {"uninstall"}} {
+		if code := run(args, noDial(t), io.Discard, io.Discard); code != 0 {
+			t.Errorf("%q: exit %d", args, code)
 		}
+	}
+	want := []string{"tray", "install", "uninstall"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("ran %q, want %q", got, want)
+	}
+}
+
+// The CLI dials only the tested earbuds.
+func TestDialsOnlyTheEarbuds(t *testing.T) {
+	var dialed []uint64
+	dial := func(addr uint64) (io.ReadWriteCloser, error) {
+		dialed = append(dialed, addr)
+		return &fakeConn{reply: replyGetOff}, nil
+	}
+	for _, cmd := range []string{"status", "off"} {
+		run([]string{cmd}, dial, io.Discard, io.Discard)
+	}
+	if fmt.Sprint(dialed) != fmt.Sprint([]uint64{earbudsAddr, earbudsAddr}) {
+		t.Errorf("dialed %x", dialed)
+	}
+}
+
+func TestNotConnectedExits1(t *testing.T) {
+	var stderr strings.Builder
+	dial := func(uint64) (io.ReadWriteCloser, error) { return nil, errNotConnected }
+	if code := run([]string{"on"}, dial, io.Discard, &stderr); code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "not connected to this PC") {
+		t.Errorf("stderr %q", stderr.String())
 	}
 }

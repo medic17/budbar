@@ -1,8 +1,20 @@
 // Command dolby reads or switches Dolby Audio on Shokz OpenFit 2+ earbuds
 // over Bluetooth RFCOMM from Windows.
 //
-//	dolby [-addr A0:0C:E2:75:63:2F] [-trace] status|on|off
+//	dolby [-trace] status|on|off|tray|install|uninstall
+//
+// It talks only to the earbuds at earbudsAddr, and only while they are
+// connected to this PC. status, on and off run once and print the result. tray shows the state as
+// a tray icon, switches from its menu or Ctrl+Q, and logs every action with
+// -trace detail to %LOCALAPPDATA%\openfit-dolby\dolby.log. install copies the
+// exe there and starts the tray at every logon; uninstall removes that task.
+//
+// The exe's manifest (dolby.manifest, embedded via the generated .syso)
+// marks it detached: it uses the console of the terminal that starts it, and
+// gets no console window when the logon task or Explorer starts it.
 package main
+
+//go:generate go run github.com/akavel/rsrc@v0.10.2 -manifest dolby.manifest -o rsrc_windows_amd64.syso
 
 import (
 	"errors"
@@ -10,14 +22,25 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
-	"strings"
 
 	"openfit-dolby/shokz"
 )
 
+// earbudsAddr is the Bluetooth address of the one pair of earbuds this tool
+// was tested with (Shokz OpenFit 2+). It is the only address the tool will
+// connect to; other earbuds have not been tested, so there is no option to
+// choose another.
+const earbudsAddr uint64 = 0xA00CE275632F
+
 // dialFunc opens an RFCOMM stream to the earbuds at a Bluetooth address.
 type dialFunc func(addr uint64) (io.ReadWriteCloser, error)
+
+// Commands that do not talk to the earbuds themselves; tests replace them.
+var (
+	startTray    = runTray
+	runInstall   = install
+	runUninstall = uninstall
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], dialRFCOMM, os.Stdout, os.Stderr))
@@ -28,11 +51,11 @@ func main() {
 func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("dolby", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	addr := fs.String("addr", "A0:0C:E2:75:63:2F", "earbuds' Bluetooth address")
 	trace := fs.Bool("trace", false, "log every byte sent and received to stderr")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: dolby [-addr XX:XX:XX:XX:XX:XX] [-trace] status|on|off")
+		fmt.Fprintln(stderr, "usage: dolby [-trace] status|on|off|tray|install|uninstall")
 		fs.PrintDefaults()
+		fmt.Fprintln(stderr, "The tray always logs with -trace detail, to "+logPath())
 	}
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -45,23 +68,28 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		return 2
 	}
 	cmd := fs.Arg(0)
-	if cmd != "status" && cmd != "on" && cmd != "off" {
+	switch cmd {
+	case "status", "on", "off", "tray", "install", "uninstall":
+	default:
 		fmt.Fprintf(stderr, "dolby: unknown command %q\n", cmd)
 		fs.Usage()
 		return 2
 	}
-	bt, err := parseAddr(*addr)
-	if err != nil {
-		fmt.Fprintln(stderr, "dolby:", err)
-		return 2
+	switch cmd {
+	case "tray":
+		return startTray(dial, stderr)
+	case "install":
+		return runInstall(stdout, stderr)
+	case "uninstall":
+		return runUninstall(stdout, stderr)
 	}
 
 	var tr *tracer
 	if *trace {
 		tr = newTracer(stderr)
-		tr.logf("command %q, connecting to %012X", cmd, bt)
+		tr.logf("command %q, connecting to %012X", cmd, earbudsAddr)
 	}
-	conn, err := dial(bt)
+	conn, err := dial(earbudsAddr)
 	if err != nil {
 		if tr != nil {
 			tr.logf("connect failed: %v", err)
@@ -90,14 +118,4 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, map[bool]string{true: "on", false: "off"}[on])
 	return 0
-}
-
-// parseAddr reads a 12-hex-digit Bluetooth address, with or without colons.
-func parseAddr(s string) (uint64, error) {
-	h := strings.ReplaceAll(s, ":", "")
-	v, err := strconv.ParseUint(h, 16, 48)
-	if len(h) != 12 || err != nil {
-		return 0, fmt.Errorf("bad Bluetooth address %q", s)
-	}
-	return v, nil
 }

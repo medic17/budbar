@@ -49,6 +49,25 @@ func (c *Client) Set(on bool) (sent bool, err error) {
 	if cur == on {
 		return false, nil
 	}
+	return c.change(on)
+}
+
+// Toggle switches Dolby Audio to the opposite of what the earbuds report and
+// returns the new state. Like Set, it confirms the change by reading again.
+func (c *Client) Toggle() (on bool, err error) {
+	cur, err := c.Status()
+	if err != nil {
+		return false, err
+	}
+	if _, err := c.change(!cur); err != nil {
+		return false, err
+	}
+	return !cur, nil
+}
+
+// change sends the one set request this Client may send and confirms the
+// earbuds now report on.
+func (c *Client) change(on bool) (sent bool, err error) {
 	if c.setSent {
 		return false, errors.New("this connection already sent a set request")
 	}

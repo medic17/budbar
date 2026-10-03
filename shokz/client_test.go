@@ -225,6 +225,63 @@ func TestOneSetPerClient(t *testing.T) {
 	expectSent(t, f, GetDolby, SetOn, GetDolby, GetDolby)
 }
 
+func TestToggle(t *testing.T) {
+	for _, tc := range []struct {
+		from bool
+		want []Request
+	}{
+		{false, []Request{GetDolby, SetOn, GetDolby}},
+		{true, []Request{GetDolby, SetOff, GetDolby}},
+	} {
+		f := &fakeEarbuds{on: tc.from}
+		on, err := NewClient(f).Toggle()
+		if err != nil || on == tc.from || f.on == tc.from {
+			t.Errorf("toggle from %v: got %v, err=%v, earbuds on=%v", tc.from, on, err, f.on)
+		}
+		expectSent(t, f, tc.want...)
+	}
+}
+
+func TestToggleFailures(t *testing.T) {
+	ignoreSet := func(f *fakeEarbuds, frame []byte) []byte {
+		if bytes.Equal(frame, frameGetDolby) {
+			return honest(f, frame)
+		}
+		return replySet
+	}
+	for _, tc := range []struct {
+		name string
+		f    *fakeEarbuds
+		want []Request
+	}{
+		{"no reply to get", &fakeEarbuds{respond: func(*fakeEarbuds, []byte) []byte { return nil }},
+			[]Request{GetDolby}},
+		{"set ignored", &fakeEarbuds{respond: ignoreSet},
+			[]Request{GetDolby, SetOn, GetDolby}},
+	} {
+		if _, err := NewClient(tc.f).Toggle(); err == nil {
+			t.Errorf("%s: no error", tc.name)
+		}
+		expectSent(t, tc.f, tc.want...)
+	}
+}
+
+// Set and Toggle share the one-set limit.
+func TestOneSetPerClientAcrossToggle(t *testing.T) {
+	f := &fakeEarbuds{}
+	c := NewClient(f)
+	if _, err := c.Toggle(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Toggle(); err == nil {
+		t.Fatal("second toggle allowed")
+	}
+	if _, err := c.Set(false); err == nil {
+		t.Fatal("set after toggle allowed")
+	}
+	expectSent(t, f, GetDolby, SetOn, GetDolby, GetDolby, GetDolby)
+}
+
 func TestSendPanicsOnUnknownRequest(t *testing.T) {
 	f := &fakeEarbuds{}
 	defer func() {
