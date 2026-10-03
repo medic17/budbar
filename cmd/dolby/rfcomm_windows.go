@@ -44,9 +44,18 @@ func dialRFCOMM(addr uint64) (io.ReadWriteCloser, error) {
 	// Port 0 with a service class makes Windows find the channel through SDP.
 	if err := windows.Connect(s, &windows.SockaddrBth{BtAddr: addr, ServiceClassId: shokzService}); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("connect: %w", err)
+		return nil, connectError(err)
 	}
 	return c, nil
+}
+
+// connectError explains a failed connect. The earbuds refuse with
+// WSAEHOSTDOWN while the Shokz app holds its connection.
+func connectError(err error) error {
+	if errors.Is(err, windows.WSAEHOSTDOWN) {
+		return fmt.Errorf("connect: %w (is the Shokz app open on your phone? Close it and try again)", err)
+	}
+	return fmt.Errorf("connect: %w", err)
 }
 
 // Write sends p, which must be a captured frame.
