@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Operators, from bosectl's notes.
@@ -28,10 +29,12 @@ const (
 	OpProcessing = 7
 )
 
-// AudioModes.CurrentMode: block 31, function 3.
+// Functions of the AudioModes block (31).
 const (
 	blockAudioModes = 31
+	funcGetAll      = 1
 	funcCurrentMode = 3
+	funcModeConfig  = 6
 )
 
 // presetModes are the firmware's fixed modes, by index. Indices from 4 up are
@@ -39,12 +42,32 @@ const (
 // slot 4); their names are stored on the earbuds.
 var presetModes = []string{"Quiet", "Aware", "Immersion", "Cinema"}
 
-// ModeName names the mode at index idx: a preset's name, or "custom mode N".
-func ModeName(idx int) string {
+// presetName returns the name of the preset mode at idx, if it is one.
+func presetName(idx int) (string, bool) {
 	if idx >= 0 && idx < len(presetModes) {
-		return presetModes[idx]
+		return presetModes[idx], true
 	}
-	return fmt.Sprintf("custom mode %d", idx)
+	return "", false
+}
+
+// Layout of a ModeConfig STATUS payload, as far as this package reads it:
+// the mode index, then after 5 more bytes a 32-byte name ended by a zero
+// byte.
+const (
+	modeNameStart = 6
+	modeNameEnd   = 38
+)
+
+// modeConfigName reads the name from a ModeConfig STATUS payload.
+func modeConfigName(payload []byte) (string, error) {
+	if len(payload) < modeNameEnd {
+		return "", fmt.Errorf("mode config too short (%d bytes): % x", len(payload), payload)
+	}
+	name, _, _ := bytes.Cut(payload[modeNameStart:modeNameEnd], []byte{0})
+	if len(name) == 0 {
+		return "", fmt.Errorf("mode %d has no name", payload[0])
+	}
+	return strings.ToValidUTF8(string(name), "?"), nil
 }
 
 // Request names one of the packets the earbuds may be sent.
@@ -52,33 +75,47 @@ type Request int
 
 const (
 	GetCurrentMode Request = iota + 1
+	GetAllModes
 )
 
 func (r Request) String() string {
 	switch r {
 	case GetCurrentMode:
 		return "get current mode"
+	case GetAllModes:
+		return "get all modes"
 	}
 	return fmt.Sprintf("Request(%d)", int(r))
 }
 
-// packetGetCurrentMode is a GET of AudioModes.CurrentMode with no payload.
-var packetGetCurrentMode = []byte{blockAudioModes, funcCurrentMode, OpGet, 0}
+// The only packets the earbuds may be sent, both without payload:
+//   - a GET of AudioModes.CurrentMode;
+//   - a START of AudioModes.GetAll, which makes the earbuds report every
+//     mode's settings. START is also the operator that switches modes on
+//     other functions, so only this exact packet is allowed.
+var (
+	packetGetCurrentMode = []byte{blockAudioModes, funcCurrentMode, OpGet, 0}
+	packetGetAllModes    = []byte{blockAudioModes, funcGetAll, OpStart, 0}
+)
 
 // packet returns a copy of r's packet, or nil if r is not a known request.
 func (r Request) packet() []byte {
 	switch r {
 	case GetCurrentMode:
 		return bytes.Clone(packetGetCurrentMode)
+	case GetAllModes:
+		return bytes.Clone(packetGetAllModes)
 	}
 	return nil
 }
 
 // CheckOutgoing returns an error unless p is exactly one of the allowed
-// packets. All of them are GETs, so nothing sent can change a setting.
+// packets, none of which changes a setting.
 func CheckOutgoing(p []byte) error {
-	if bytes.Equal(p, packetGetCurrentMode) {
-		return nil
+	for _, ok := range [][]byte{packetGetCurrentMode, packetGetAllModes} {
+		if bytes.Equal(p, ok) {
+			return nil
+		}
 	}
 	return fmt.Errorf("refusing to send % x: not an allowed read request", p)
 }

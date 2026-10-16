@@ -4,8 +4,8 @@
 //	bose [-trace] mode
 //
 // It talks only to the earbuds at budsAddr, only while they are connected to
-// this PC, and sends only read requests. mode prints the active mode's name,
-// or "custom mode N" for a mode made in the Bose app.
+// this PC, and sends only read requests. mode prints the active mode's name;
+// for a mode made in the Bose app, the name stored on the earbuds.
 package main
 
 import (
@@ -77,11 +77,17 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	}
 	defer conn.Close()
 
-	mode, err := bose.NewClient(conn).CurrentMode()
+	c := bose.NewClient(conn)
+	mode, err := c.CurrentMode()
 	if err != nil {
 		fmt.Fprintln(stderr, "bose:", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, bose.ModeName(mode))
+	name, err := c.ModeName(mode)
+	if err != nil {
+		fmt.Fprintf(stderr, "bose: mode %d: %v\n", mode, err)
+		return 1
+	}
+	fmt.Fprintln(stdout, name)
 	return 0
 }

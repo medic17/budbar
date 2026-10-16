@@ -55,17 +55,18 @@ func (f *fakeConn) Write(p []byte) (int, error) { return f.sent.Write(p) }
 func (f *fakeConn) Close() error                { f.closed = true; return nil }
 
 func TestRunMode(t *testing.T) {
-	conn := &fakeConn{reply: bytes.NewReader([]byte{0x1f, 0x03, 0x03, 0x01, 0x04})}
+	// A Cinema reply: presets are named without a second request.
+	conn := &fakeConn{reply: bytes.NewReader([]byte{0x1f, 0x03, 0x03, 0x01, 0x03})}
 	var dialed []uint64
 	dial := func(addr uint64) (io.ReadWriteCloser, error) { dialed = append(dialed, addr); return conn, nil }
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"-trace", "mode"}, dial, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d, stderr %q", code, stderr.String())
 	}
-	if stdout.String() != "custom mode 4\n" || len(dialed) != 1 || dialed[0] != budsAddr || !conn.closed {
+	if stdout.String() != "Cinema\n" || len(dialed) != 1 || dialed[0] != budsAddr || !conn.closed {
 		t.Errorf("stdout %q, dialed %X, closed %v", stdout.String(), dialed, conn.closed)
 	}
-	if !strings.Contains(stderr.String(), "recv  5 bytes: 1f 03 03 01 04") {
+	if !strings.Contains(stderr.String(), "recv  5 bytes: 1f 03 03 01 03") {
 		t.Errorf("trace missing reply: %q", stderr.String())
 	}
 }

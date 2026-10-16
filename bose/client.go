@@ -28,7 +28,9 @@ func NewClient(rw io.ReadWriter) *Client {
 
 // CurrentMode returns the index of the active listening mode.
 func (c *Client) CurrentMode() (int, error) {
-	p, err := c.request(GetCurrentMode, blockAudioModes, funcCurrentMode)
+	p, err := c.request(GetCurrentMode, func(p Packet) bool {
+		return p.Block == blockAudioModes && p.Func == funcCurrentMode && p.Op == OpStatus
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -38,9 +40,27 @@ func (c *Client) CurrentMode() (int, error) {
 	return int(p.Payload[0]), nil
 }
 
-// request sends r and returns the earbuds' STATUS reply from block.fn,
-// skipping any other packets they send in between.
-func (c *Client) request(r Request, block, fn byte) (Packet, error) {
+// ModeName returns the name of the mode at index idx. Presets have fixed
+// names; for other modes it asks the earbuds for every mode's settings and
+// reads the name stored for idx.
+func (c *Client) ModeName(idx int) (string, error) {
+	if name, ok := presetName(idx); ok {
+		return name, nil
+	}
+	p, err := c.request(GetAllModes, func(p Packet) bool {
+		return p.Block == blockAudioModes && p.Func == funcModeConfig && p.Op == OpStatus &&
+			len(p.Payload) > 0 && int(p.Payload[0]) == idx
+	})
+	if err != nil {
+		return "", err
+	}
+	return modeConfigName(p.Payload)
+}
+
+// request sends r and returns the first packet that want accepts, skipping
+// any others. An ERROR from the function r addressed ends the wait.
+func (c *Client) request(r Request, want func(Packet) bool) (Packet, error) {
+	sent := r.packet()
 	if err := c.send(r); err != nil {
 		return Packet{}, fmt.Errorf("send %s: %w", r, err)
 	}
@@ -62,13 +82,10 @@ func (c *Client) request(r Request, block, fn byte) (Packet, error) {
 			return Packet{}, err
 		}
 		c.buf = c.buf[n:]
-		if p.Block != block || p.Func != fn {
-			continue
-		}
-		switch p.Op {
-		case OpStatus:
+		if want(p) {
 			return p, nil
-		case OpError:
+		}
+		if p.Op == OpError && p.Block == sent[0] && p.Func == sent[1] {
 			return Packet{}, fmt.Errorf("%s: earbuds answered with error % x", r, p.Payload)
 		}
 	}
