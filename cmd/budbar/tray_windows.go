@@ -254,7 +254,7 @@ func (t *tray) create() error {
 	t.icons = map[iconKey]windows.Handle{}
 	for state, rgb := range colors {
 		for _, busy := range []bool{false, true} {
-			t.icons[iconKey{state, busy}] = makeIcon(int(size), rgb, busy)
+			t.icons[iconKey{state, busy}] = makeIcon(int(size), headphonePixels(int(size), rgb, busy))
 		}
 	}
 
@@ -530,10 +530,10 @@ type iconInfo struct {
 	Color    windows.Handle
 }
 
-// makeIcon turns headphonePixels into an icon handle: a 32-bit top-down
-// bitmap whose alpha channel carries the shape, plus the empty mask that
-// CreateIconIndirect requires.
-func makeIcon(size int, rgb uint32, outline bool) windows.Handle {
+// makeIcon turns size×size pixels of 0xAARRGGBB (top row first, straight
+// alpha) into an icon handle: a 32-bit top-down bitmap whose alpha channel
+// carries the shape, plus the empty mask that CreateIconIndirect requires.
+func makeIcon(size int, pixels []uint32) windows.Handle {
 	bi := bitmapInfoHeader{Width: int32(size), Height: -int32(size), Planes: 1, BitCount: 32}
 	bi.Size = uint32(unsafe.Sizeof(bi))
 	var bits unsafe.Pointer
@@ -542,7 +542,7 @@ func makeIcon(size int, rgb uint32, outline bool) windows.Handle {
 	if color == 0 {
 		return 0
 	}
-	copy(unsafe.Slice((*uint32)(bits), size*size), headphonePixels(size, rgb, outline))
+	copy(unsafe.Slice((*uint32)(bits), size*size), pixels)
 	maskBits := make([]byte, ((size+15)/16*2)*size)
 	mask, _, _ := procCreateBitmap.Call(uintptr(size), uintptr(size), 1, 1, uintptr(unsafe.Pointer(&maskBits[0])))
 	ii := iconInfo{FIcon: 1, Mask: windows.Handle(mask), Color: windows.Handle(color)}
