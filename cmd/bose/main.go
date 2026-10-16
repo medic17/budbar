@@ -3,7 +3,7 @@
 //
 //	bose [-trace] [-for duration] mode|watch
 //
-// It talks only to the earbuds at budsAddr, only while they are connected to
+// It talks only to the earbuds at bose.BudsAddr, only while they are connected to
 // this PC, and sends only read requests. mode prints the active mode's name;
 // for a mode made in the Bose app, the name stored on the earbuds. watch
 // prints the active mode's index, then keeps the connection open and prints
@@ -22,16 +22,11 @@ import (
 	"openfit-dolby/bt"
 )
 
-// budsAddr is the Bluetooth address of the one pair of earbuds this tool was
-// tested with (Bose QC Ultra Earbuds, 2nd Gen). It is the only address the
-// tool will connect to.
-const budsAddr uint64 = 0x68F21F3B5CB7
-
 // dialFunc opens an RFCOMM stream to the earbuds at a Bluetooth address.
 type dialFunc func(addr uint64) (io.ReadWriteCloser, error)
 
 func main() {
-	os.Exit(run(os.Args[1:], dialRFCOMM, os.Stdout, os.Stderr))
+	os.Exit(run(os.Args[1:], bose.Dial, os.Stdout, os.Stderr))
 }
 
 // run checks all arguments before dialing, so bad input never opens a
@@ -65,9 +60,9 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	var tr *bt.Tracer
 	if *trace {
 		tr = bt.NewTracer(stderr)
-		tr.Logf("connecting to %012X", budsAddr)
+		tr.Logf("connecting to %012X", bose.BudsAddr)
 	}
-	conn, err := dial(budsAddr)
+	conn, err := dial(bose.BudsAddr)
 	if err != nil {
 		if tr != nil {
 			tr.Logf("connect failed: %v", err)

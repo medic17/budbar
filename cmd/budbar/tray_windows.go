@@ -24,6 +24,8 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"openfit-dolby/bose"
 )
 
 var (
@@ -90,11 +92,14 @@ const (
 	modNoRepeat = 0x4000
 	vkQ         = 'Q'
 
-	cmdTurnOn  = 1
-	cmdTurnOff = 2
-	cmdRefresh = 3
-	cmdOpenLog = 4
-	cmdExit    = 5
+	cmdTurnOn       = 1
+	cmdTurnOff      = 2
+	cmdRefresh      = 3
+	cmdOpenLog      = 4
+	cmdExit         = 5
+	cmdRefreshModes = 6
+
+	wmSettingChange = 0x001A // also sent when the light/dark theme changes
 )
 
 const (
@@ -161,17 +166,30 @@ type iconKey struct {
 	busy  bool
 }
 
+// boseIconKey picks one of the four Bose icons: the look for a dark or light
+// taskbar, normal or dimmed after a failed check.
+type boseIconKey struct {
+	dark, dim bool
+}
+
+// The tray shows one pair of earbuds at a time: the Bose earbuds while they
+// are connected, otherwise the Shokz Dolby state as before. Both pairs are
+// never connected to this PC at once.
 type tray struct {
 	hwnd           windows.HWND
 	agent          *agent
+	bose           *boseAgent
 	log            *appLog
 	taskbarCreated uint32
 	icons          map[iconKey]windows.Handle
+	boseIcons      map[boseIconKey]windows.Handle
+	dark           bool // taskbar theme; read and used on the window's thread
 	hotkeyErr      error
 	radio          windows.Handle
 
-	mu     sync.Mutex
-	status Status
+	mu         sync.Mutex
+	status     Status
+	boseStatus BoseStatus
 }
 
 // theTray is the single instance the window procedure dispatches to; Windows
@@ -193,18 +211,23 @@ func runTray(dial dialFunc, stderr io.Writer) int {
 	t := &tray{log: log}
 	theTray = t
 	t.agent = newAgent(dial, earbudsConnected, log, t.SetStatus)
+	t.bose = newBoseAgent(bose.Dial, bose.Connected, log, t.SetBoseStatus)
 	if err := t.create(); err != nil {
 		t.logf("tray setup failed: %v", err)
 		fmt.Fprintln(stderr, "budbar: tray setup failed:", err)
 		return 1
 	}
-	t.logf("tray started (pid %d, earbuds %012X)", os.Getpid(), earbudsAddr)
+	t.logf("tray started (pid %d, Shokz %012X, Bose %012X, dark taskbar %t)",
+		os.Getpid(), earbudsAddr, bose.BudsAddr, t.dark)
 	if t.hotkeyErr != nil {
 		t.logf("Ctrl+Q not available: %v", t.hotkeyErr)
 	}
 	t.agent.Check("startup")
+	t.bose.Check("startup")
 	t.loop()
+	t.bose.Stop()
 	t.agent.Wait()
+	t.bose.Wait()
 	t.logf("tray exited")
 	return 0
 }
@@ -238,6 +261,14 @@ func (t *tray) SetStatus(s Status) {
 	procPostMessageW.Call(uintptr(t.hwnd), wmRefresh, 0, 0)
 }
 
+// SetBoseStatus is SetStatus for the Bose agent.
+func (t *tray) SetBoseStatus(s BoseStatus) {
+	t.mu.Lock()
+	t.boseStatus = s
+	t.mu.Unlock()
+	procPostMessageW.Call(uintptr(t.hwnd), wmRefresh, 0, 0)
+}
+
 // create makes the window, icons, hotkey and Bluetooth registration. It must
 // run on the thread that runs the message loop.
 func (t *tray) create() error {
@@ -257,6 +288,17 @@ func (t *tray) create() error {
 			t.icons[iconKey{state, busy}] = makeIcon(int(size), headphonePixels(int(size), rgb, busy))
 		}
 	}
+	t.boseIcons = map[boseIconKey]windows.Handle{}
+	for _, dark := range []bool{false, true} {
+		for _, dim := range []bool{false, true} {
+			px, err := bosePixels(int(size), dark, dim)
+			if err != nil {
+				return fmt.Errorf("Bose icon: %w", err)
+			}
+			t.boseIcons[boseIconKey{dark, dim}] = makeIcon(int(size), px)
+		}
+	}
+	t.dark = taskbarDark()
 
 	inst, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetModuleHandleW").Call(0)
 	cls, _ := windows.UTF16PtrFromString("budbar-tray")
@@ -269,7 +311,7 @@ func (t *tray) create() error {
 	if r, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc))); r == 0 {
 		return err
 	}
-	title, _ := windows.UTF16PtrFromString("Dolby Audio switch")
+	title, _ := windows.UTF16PtrFromString("budbar")
 	h, _, err := procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(cls)), uintptr(unsafe.Pointer(title)),
 		0, 0, 0, 0, 0, 0, 0, inst, 0)
 	if h == 0 {
@@ -300,6 +342,22 @@ func (t *tray) current() Status {
 	return t.status
 }
 
+func (t *tray) currentBose() BoseStatus {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.boseStatus
+}
+
+// look returns the icon and the two text lines for the pair the tray shows:
+// the Bose earbuds while they are connected, otherwise the Shokz.
+func (t *tray) look() (icon windows.Handle, head, detail string) {
+	if b := t.currentBose(); b.Connected {
+		return t.boseIcons[boseIconKey{t.dark, b.Failed}], boseHeadline(b), b.Detail
+	}
+	s := t.current()
+	return t.icons[iconKey{s.State, s.Busy}], headline(s), detailLine(s)
+}
+
 func (t *tray) nid() notifyIconData {
 	var n notifyIconData
 	n.Size = uint32(unsafe.Sizeof(n))
@@ -309,12 +367,12 @@ func (t *tray) nid() notifyIconData {
 }
 
 func (t *tray) addIcon() {
-	s := t.current()
+	icon, head, detail := t.look()
 	n := t.nid()
 	n.Flags = nifMessage | nifIcon | nifTip | nifShowTip
 	n.CallbackMessage = wmTray
-	n.Icon = t.icons[iconKey{s.State, s.Busy}]
-	copyUTF16(n.Tip[:], tipText(s))
+	n.Icon = icon
+	copyUTF16(n.Tip[:], head+"\n"+detail)
 	procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&n)))
 	n.TimeoutOrVersion = notifyIconV4
 	procShellNotifyIconW.Call(nimSetVersion, uintptr(unsafe.Pointer(&n)))
@@ -326,11 +384,11 @@ func (t *tray) removeIcon() {
 }
 
 func (t *tray) refresh() {
-	s := t.current()
+	icon, head, detail := t.look()
 	n := t.nid()
 	n.Flags = nifIcon | nifTip | nifShowTip
-	n.Icon = t.icons[iconKey{s.State, s.Busy}]
-	copyUTF16(n.Tip[:], tipText(s))
+	n.Icon = icon
+	copyUTF16(n.Tip[:], head+"\n"+detail)
 	procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&n)))
 }
 
@@ -351,12 +409,18 @@ func detailLine(s Status) string {
 	return s.Detail
 }
 
-func tipText(s Status) string {
-	return headline(s) + "\n" + detailLine(s)
+// boseHeadline is the Bose earbuds' first line: their mode once read.
+func boseHeadline(b BoseStatus) string {
+	if b.Mode == "" {
+		return "Bose mode: reading..."
+	}
+	return "Bose mode: " + b.Mode
 }
 
 func (t *tray) showMenu(x, y int32) {
 	s := t.current()
+	b := t.currentBose()
+	_, head, detail := t.look()
 
 	m, _, _ := procCreatePopupMenu.Call()
 	defer procDestroyMenu.Call(m)
@@ -370,8 +434,8 @@ func (t *tray) showMenu(x, y int32) {
 		}
 		return mfString | mfGrayed
 	}
-	add(mfString|mfGrayed, 0, headline(s))
-	add(mfString|mfGrayed, 0, detailLine(s))
+	add(mfString|mfGrayed, 0, head)
+	add(mfString|mfGrayed, 0, detail)
 	if t.hotkeyErr != nil {
 		add(mfString|mfGrayed, 0, "Ctrl+Q not available (see log)")
 	}
@@ -379,7 +443,8 @@ func (t *tray) showMenu(x, y int32) {
 	ready := s.Connected && !s.Busy
 	add(enabled(ready && s.State != stateOn), cmdTurnOn, "Turn on")
 	add(enabled(ready && s.State != stateOff), cmdTurnOff, "Turn off")
-	add(enabled(ready), cmdRefresh, "Refresh")
+	add(enabled(ready || b.Connected), cmdRefresh, "Refresh")
+	add(enabled(b.Connected), cmdRefreshModes, "Refresh modes")
 	add(mfString, cmdOpenLog, "Open log")
 	add(mfSeparator, 0, "")
 	add(mfString, cmdExit, "Exit")
@@ -395,7 +460,13 @@ func (t *tray) showMenu(x, y int32) {
 	case cmdTurnOff:
 		t.agent.Do(actOff, "menu")
 	case cmdRefresh:
-		t.agent.Do(actRefresh, "menu")
+		if b.Connected {
+			t.bose.Refresh("menu", false)
+		} else {
+			t.agent.Do(actRefresh, "menu")
+		}
+	case cmdRefreshModes:
+		t.bose.Refresh("menu: refresh modes", true)
 	case cmdOpenLog:
 		openLog()
 	case cmdExit:
@@ -411,8 +482,9 @@ func openLog() {
 }
 
 // onDeviceChange handles the radio's Bluetooth events. Every HCI event is
-// logged with what BluetoothGetDeviceInfo reports at that moment. The
-// earbuds' ACL connect schedules a read; their disconnect greys the icon.
+// logged with what BluetoothGetDeviceInfo reports for the Shokz at that
+// moment. Either pair's ACL connect schedules a read; its disconnect shows
+// it as not connected.
 func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 	if wparam != dbtCustomEvent || lparam == 0 {
 		return
@@ -424,15 +496,20 @@ func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 		return
 	}
 	now, err := earbudsConnected()
-	t.logf("bluetooth: %012X type %d connected=%t (earbuds connected per Windows: %t, err=%v)",
+	t.logf("bluetooth: %012X type %d connected=%t (Shokz connected per Windows: %t, err=%v)",
 		ev.Addr, ev.ConnType, ev.Connected, now, err)
-	if ev.Addr != earbudsAddr || ev.ConnType != hciConnTypeACL {
+	if ev.ConnType != hciConnTypeACL {
 		return
 	}
-	if ev.Connected {
+	switch {
+	case ev.Addr == earbudsAddr && ev.Connected:
 		t.agent.Connected("earbuds connected", connectSettle)
-	} else {
+	case ev.Addr == earbudsAddr:
 		t.agent.Disconnected("disconnected")
+	case ev.Addr == bose.BudsAddr && ev.Connected:
+		t.bose.Connected("earbuds connected", connectSettle)
+	case ev.Addr == bose.BudsAddr:
+		t.bose.Disconnected("disconnected")
 	}
 }
 
@@ -442,9 +519,24 @@ func (t *tray) onPower(wparam uintptr) {
 	switch wparam {
 	case pbtAPMSuspend:
 		t.agent.Disconnected("sleep")
+		t.bose.Disconnected("sleep")
 	case pbtAPMResumeAutomatic:
-		t.logf("resumed; checking the connection in %s", resumeSettle)
-		time.AfterFunc(resumeSettle, func() { t.agent.Check("resume") })
+		t.logf("resumed; checking the connections in %s", resumeSettle)
+		time.AfterFunc(resumeSettle, func() {
+			t.agent.Check("resume")
+			t.bose.Check("resume")
+		})
+	}
+}
+
+// onSettingChange picks the Bose icon's look again when the taskbar theme
+// changes. Windows sends WM_SETTINGCHANGE for many settings; reading one
+// registry value each time is cheap.
+func (t *tray) onSettingChange() {
+	if dark := taskbarDark(); dark != t.dark {
+		t.dark = dark
+		t.logf("taskbar theme changed: dark=%t", dark)
+		t.refresh()
 	}
 }
 
@@ -484,6 +576,9 @@ func wndProc(hwnd windows.HWND, msg uint32, wparam, lparam uintptr) uintptr {
 	case msg == wmPowerBroadcast:
 		t.onPower(wparam)
 		return 1
+	case msg == wmSettingChange:
+		t.onSettingChange()
+		return 0
 	case msg == t.taskbarCreated && msg != 0:
 		t.addIcon() // Explorer restarted and forgot every tray icon
 		return 0
