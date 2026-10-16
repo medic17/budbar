@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 
+	"openfit-dolby/bt"
 	"openfit-dolby/shokz"
 )
 
@@ -84,22 +85,22 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		return runUninstall(stdout, stderr)
 	}
 
-	var tr *tracer
+	var tr *bt.Tracer
 	if *trace {
-		tr = newTracer(stderr)
-		tr.logf("command %q, connecting to %012X", cmd, earbudsAddr)
+		tr = bt.NewTracer(stderr)
+		tr.Logf("command %q, connecting to %012X", cmd, earbudsAddr)
 	}
 	conn, err := dial(earbudsAddr)
 	if err != nil {
 		if tr != nil {
-			tr.logf("connect failed: %v", err)
+			tr.Logf("connect failed: %v", err)
 		}
 		fmt.Fprintln(stderr, "dolby:", err)
 		return 1
 	}
 	if tr != nil {
-		tr.logf("connected")
-		tr.rw = conn
+		tr.Logf("connected")
+		tr.RW = conn
 		conn = tr
 	}
 	defer conn.Close()

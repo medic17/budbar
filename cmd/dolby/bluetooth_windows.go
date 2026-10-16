@@ -13,59 +13,19 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"openfit-dolby/bt"
 )
 
-var (
-	bluetoothAPIs                   = windows.NewLazySystemDLL("BluetoothApis.dll")
-	procBluetoothFindFirstRadio     = bluetoothAPIs.NewProc("BluetoothFindFirstRadio")
-	procBluetoothFindRadioClose     = bluetoothAPIs.NewProc("BluetoothFindRadioClose")
-	procBluetoothGetDeviceInfo      = bluetoothAPIs.NewProc("BluetoothGetDeviceInfo")
-	procRegisterDeviceNotificationW = user32.NewProc("RegisterDeviceNotificationW")
-)
-
-// bluetoothDeviceInfo is BLUETOOTH_DEVICE_INFO.
-type bluetoothDeviceInfo struct {
-	Size          uint32
-	Address       uint64
-	ClassOfDevice uint32
-	Connected     int32
-	Remembered    int32
-	Authenticated int32
-	LastSeen      windows.Systemtime
-	LastUsed      windows.Systemtime
-	Name          [248]uint16
-}
-
-// firstRadio opens the first local Bluetooth radio. The caller closes it.
-func firstRadio() (windows.Handle, error) {
-	params := struct{ Size uint32 }{4} // BLUETOOTH_FIND_RADIO_PARAMS
-	var radio windows.Handle
-	find, _, err := procBluetoothFindFirstRadio.Call(uintptr(unsafe.Pointer(&params)), uintptr(unsafe.Pointer(&radio)))
-	if find == 0 {
-		return 0, fmt.Errorf("no Bluetooth radio: %w", err)
-	}
-	procBluetoothFindRadioClose.Call(find)
-	return radio, nil
-}
+var procRegisterDeviceNotificationW = user32.NewProc("RegisterDeviceNotificationW")
 
 // earbudsConnected asks Windows whether the earbuds are connected to this PC.
 // It only reads Windows' own records; nothing is sent over the air.
 func earbudsConnected() (bool, error) {
-	radio, err := firstRadio()
-	if err != nil {
-		return false, err
-	}
-	defer windows.CloseHandle(radio)
-	info := bluetoothDeviceInfo{Address: earbudsAddr}
-	info.Size = uint32(unsafe.Sizeof(info))
-	if r, _, _ := procBluetoothGetDeviceInfo.Call(uintptr(radio), uintptr(unsafe.Pointer(&info))); r != 0 {
-		return false, fmt.Errorf("BluetoothGetDeviceInfo: %w", syscall.Errno(r))
-	}
-	return info.Connected != 0, nil
+	return bt.Connected(earbudsAddr)
 }
 
 const (
@@ -105,7 +65,7 @@ type hciEvent struct {
 // watchBluetooth opens the first Bluetooth radio and registers hwnd for its
 // events. The radio handle must stay open for as long as the registration.
 func watchBluetooth(hwnd windows.HWND) (windows.Handle, error) {
-	radio, err := firstRadio()
+	radio, err := bt.FirstRadio()
 	if err != nil {
 		return 0, err
 	}

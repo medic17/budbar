@@ -9,6 +9,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"openfit-dolby/bt"
 	"openfit-dolby/shokz"
 )
 
@@ -201,15 +202,15 @@ func (a *agent) RefreshLater(d time.Duration, why string) {
 func (a *agent) Wait() { a.running.Wait() }
 
 func (a *agent) perform(act action, why string) Status {
-	tr := newTracer(a.log)
-	tr.logf("%s (%s), connecting to %012X", act, why, earbudsAddr)
+	tr := bt.NewTracer(a.log)
+	tr.Logf("%s (%s), connecting to %012X", act, why, earbudsAddr)
 	conn, err := a.dial(earbudsAddr)
 	if err != nil {
-		tr.logf("connect failed: %v", err)
+		tr.Logf("connect failed: %v", err)
 		return a.failed(err)
 	}
-	tr.logf("connected")
-	tr.rw = conn
+	tr.Logf("connected")
+	tr.RW = conn
 	defer tr.Close()
 
 	c := shokz.NewClient(tr)
@@ -226,14 +227,14 @@ func (a *agent) perform(act action, why string) Status {
 		err = fmt.Errorf("unknown action %v", act)
 	}
 	if err != nil {
-		tr.logf("failed: %v", err)
+		tr.Logf("failed: %v", err)
 		return a.failed(err)
 	}
 	s := Status{State: stateOff, Connected: true, Detail: "checked " + a.clock()}
 	if on {
 		s.State = stateOn
 	}
-	tr.logf("Dolby Audio %s", s.State)
+	tr.Logf("Dolby Audio %s", s.State)
 	return s
 }
 

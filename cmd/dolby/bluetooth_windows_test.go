@@ -23,25 +23,6 @@ func TestDevBroadcastHandleLayout(t *testing.T) {
 	}
 }
 
-func TestBluetoothDeviceInfoLayout(t *testing.T) {
-	// Offsets and size of BLUETOOTH_DEVICE_INFO on 64-bit Windows.
-	var d bluetoothDeviceInfo
-	for _, tc := range []struct {
-		name      string
-		got, want uintptr
-	}{
-		{"Address", unsafe.Offsetof(d.Address), 8},
-		{"fConnected", unsafe.Offsetof(d.Connected), 20},
-		{"stLastSeen", unsafe.Offsetof(d.LastSeen), 32},
-		{"szName", unsafe.Offsetof(d.Name), 64},
-		{"sizeof", unsafe.Sizeof(d), 560},
-	} {
-		if tc.got != tc.want {
-			t.Errorf("%s at %d, want %d", tc.name, tc.got, tc.want)
-		}
-	}
-}
-
 // broadcast builds a DEV_BROADCAST_HANDLE carrying data, as Windows would.
 // The buffer is made of uint64s so it is aligned like Windows' own.
 func broadcast(guidOK bool, data []byte) *devBroadcastHandle {
