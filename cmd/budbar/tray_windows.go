@@ -184,7 +184,7 @@ func runTray(dial dialFunc, stderr io.Writer) int {
 	runtime.LockOSThread()
 
 	if !claimSingleInstance() {
-		fmt.Fprintln(stderr, "dolby: the tray is already running")
+		fmt.Fprintln(stderr, "budbar: the tray is already running")
 		return 1
 	}
 	log := openAppLog(os.Stderr)
@@ -195,7 +195,7 @@ func runTray(dial dialFunc, stderr io.Writer) int {
 	t.agent = newAgent(dial, earbudsConnected, log, t.SetStatus)
 	if err := t.create(); err != nil {
 		t.logf("tray setup failed: %v", err)
-		fmt.Fprintln(stderr, "dolby: tray setup failed:", err)
+		fmt.Fprintln(stderr, "budbar: tray setup failed:", err)
 		return 1
 	}
 	t.logf("tray started (pid %d, earbuds %012X)", os.Getpid(), earbudsAddr)
@@ -216,7 +216,7 @@ func (t *tray) logf(format string, args ...any) {
 // claimSingleInstance takes the named mutex that marks the running tray.
 // Windows drops it however the process exits, so there is no stale lock.
 func claimSingleInstance() bool {
-	name, err := windows.UTF16PtrFromString(`Local\openfit-dolby-tray`)
+	name, err := windows.UTF16PtrFromString(`Local\budbar-tray`)
 	if err != nil {
 		return true
 	}
@@ -259,7 +259,7 @@ func (t *tray) create() error {
 	}
 
 	inst, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetModuleHandleW").Call(0)
-	cls, _ := windows.UTF16PtrFromString("openfit-dolby-tray")
+	cls, _ := windows.UTF16PtrFromString("budbar-tray")
 	wc := wndClassEx{
 		WndProc:   windows.NewCallback(wndProc),
 		Instance:  windows.Handle(inst),

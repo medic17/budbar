@@ -16,10 +16,10 @@ func appDir() string {
 	if base == "" {
 		base = os.TempDir()
 	}
-	return filepath.Join(base, "openfit-dolby")
+	return filepath.Join(base, "budbar")
 }
 
-func logPath() string { return filepath.Join(appDir(), "dolby.log") }
+func logPath() string { return filepath.Join(appDir(), "budbar.log") }
 
 // appLog is the tray's log: every line gets a wall-clock timestamp and goes
 // to the log file and to echo. Writers must write whole lines, as the tracer

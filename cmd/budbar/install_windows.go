@@ -23,9 +23,9 @@ import (
 	"unicode/utf16"
 )
 
-const taskName = "OpenFit Dolby tray"
+const taskName = "budbar tray"
 
-func installedExePath() string { return filepath.Join(appDir(), "dolby.exe") }
+func installedExePath() string { return filepath.Join(appDir(), "budbar.exe") }
 
 func currentUser() string {
 	dom := os.Getenv("USERDOMAIN")
@@ -140,7 +140,7 @@ func stopTray() {
 // install copies the exe to appDir, registers the logon task and starts it.
 func install(stdout, stderr io.Writer) int {
 	fail := func(format string, args ...any) int {
-		fmt.Fprintf(stderr, "dolby: install: "+format+"\n", args...)
+		fmt.Fprintf(stderr, "budbar: install: "+format+"\n", args...)
 		return 1
 	}
 	// Order matters: stop the old tray before replacing its exe, and start
@@ -175,7 +175,7 @@ func uninstall(stdout, stderr io.Writer) int {
 	// it started.
 	stopTray()
 	if out, err := exec.Command("schtasks", "/Delete", "/TN", taskName, "/F").CombinedOutput(); err != nil {
-		fmt.Fprintf(stderr, "dolby: uninstall: schtasks /Delete: %v\n%s\n", err, strings.TrimSpace(string(out)))
+		fmt.Fprintf(stderr, "budbar: uninstall: schtasks /Delete: %v\n%s\n", err, strings.TrimSpace(string(out)))
 		return 1
 	}
 	fmt.Fprintf(stdout, "removed task %s\nexe and log left in %s\n", taskName, appDir())

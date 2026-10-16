@@ -1,20 +1,20 @@
-// Command dolby reads or switches Dolby Audio on Shokz OpenFit 2+ earbuds
+// Command budbar reads or switches Dolby Audio on Shokz OpenFit 2+ earbuds
 // over Bluetooth RFCOMM from Windows.
 //
-//	dolby [-trace] status|on|off|tray|install|uninstall
+//	budbar [-trace] status|on|off|tray|install|uninstall
 //
 // It talks only to the earbuds at earbudsAddr, and only while they are
 // connected to this PC. status, on and off run once and print the result. tray shows the state as
 // a tray icon, switches from its menu or Ctrl+Q, and logs every action with
-// -trace detail to %LOCALAPPDATA%\openfit-dolby\dolby.log. install copies the
+// -trace detail to %LOCALAPPDATA%\budbar\budbar.log. install copies the
 // exe there and starts the tray at every logon; uninstall removes that task.
 //
-// The exe's manifest (dolby.manifest, embedded via the generated .syso)
+// The exe's manifest (budbar.manifest, embedded via the generated .syso)
 // marks it detached: it uses the console of the terminal that starts it, and
 // gets no console window when the logon task or Explorer starts it.
 package main
 
-//go:generate go run github.com/akavel/rsrc@v0.10.2 -manifest dolby.manifest -o rsrc_windows_amd64.syso
+//go:generate go run github.com/akavel/rsrc@v0.10.2 -manifest budbar.manifest -o rsrc_windows_amd64.syso
 
 import (
 	"errors"
@@ -50,11 +50,11 @@ func main() {
 // run checks all arguments before dialing, so bad input never opens a
 // connection. It returns the process exit code.
 func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("dolby", flag.ContinueOnError)
+	fs := flag.NewFlagSet("budbar", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	trace := fs.Bool("trace", false, "log every byte sent and received to stderr")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: dolby [-trace] status|on|off|tray|install|uninstall")
+		fmt.Fprintln(stderr, "usage: budbar [-trace] status|on|off|tray|install|uninstall")
 		fs.PrintDefaults()
 		fmt.Fprintln(stderr, "The tray always logs with -trace detail, to "+logPath())
 	}
@@ -72,7 +72,7 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "status", "on", "off", "tray", "install", "uninstall":
 	default:
-		fmt.Fprintf(stderr, "dolby: unknown command %q\n", cmd)
+		fmt.Fprintf(stderr, "budbar: unknown command %q\n", cmd)
 		fs.Usage()
 		return 2
 	}
@@ -95,7 +95,7 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		if tr != nil {
 			tr.Logf("connect failed: %v", err)
 		}
-		fmt.Fprintln(stderr, "dolby:", err)
+		fmt.Fprintln(stderr, "budbar:", err)
 		return 1
 	}
 	if tr != nil {
@@ -114,7 +114,7 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		_, err = c.Set(on)
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "dolby:", err)
+		fmt.Fprintln(stderr, "budbar:", err)
 		return 1
 	}
 	fmt.Fprintln(stdout, map[bool]string{true: "on", false: "off"}[on])
