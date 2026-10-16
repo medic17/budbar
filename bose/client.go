@@ -91,6 +91,25 @@ func (c *Client) request(r Request, want func(Packet) bool) (Packet, error) {
 	}
 }
 
+// ReadPacket returns the next packet the earbuds send, waiting for one if
+// none is buffered. It sends nothing.
+func (c *Client) ReadPacket() (Packet, error) {
+	for {
+		p, n, err := Next(c.buf)
+		if errors.Is(err, ErrShort) {
+			if _, err := c.fill(); err != nil {
+				return Packet{}, err
+			}
+			continue
+		}
+		if err != nil {
+			return Packet{}, err
+		}
+		c.buf = c.buf[n:]
+		return p, nil
+	}
+}
+
 func (c *Client) send(r Request) error {
 	p := r.packet()
 	MustAllow(p)

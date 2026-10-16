@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckTarget(t *testing.T) {
@@ -68,6 +69,41 @@ func TestRunMode(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "recv  5 bytes: 1f 03 03 01 03") {
 		t.Errorf("trace missing reply: %q", stderr.String())
+	}
+}
+
+func TestRunWatchPrintsUntilClosed(t *testing.T) {
+	conn := &fakeConn{reply: bytes.NewReader([]byte{
+		0x1f, 0x03, 0x03, 0x01, 0x04, // reply to the GET
+		0x1f, 0x03, 0x03, 0x01, 0x00, // pushed by the earbuds
+	})}
+	dial := func(uint64) (io.ReadWriteCloser, error) { return conn, nil }
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"watch"}, dial, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "closed") {
+		t.Errorf("exit %d, stderr %q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "mode 4\n") || !strings.Contains(out, "[31.3] op 3: 00\n") {
+		t.Errorf("stdout %q", out)
+	}
+	if conn.sent.Len() != 4 {
+		t.Errorf("sent % x, want only the GET", conn.sent.Bytes())
+	}
+}
+
+func TestRunWatchStopsAtDeadline(t *testing.T) {
+	defer func(old func() time.Time) { now = old }(now)
+	t0 := time.Now()
+	calls := 0
+	// Every call to the clock moves it a minute on, so the first check
+	// after the start is past a 90 s deadline.
+	now = func() time.Time { calls++; return t0.Add(time.Duration(calls) * time.Minute) }
+	conn := &fakeConn{reply: bytes.NewReader([]byte{0x1f, 0x03, 0x03, 0x01, 0x04})}
+	dial := func(uint64) (io.ReadWriteCloser, error) { return conn, nil }
+	var stderr bytes.Buffer
+	if code := run([]string{"-for", "90s", "watch"}, dial, io.Discard, &stderr); code != 0 {
+		t.Errorf("exit %d, stderr %q", code, stderr.String())
 	}
 }
 

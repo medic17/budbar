@@ -230,6 +230,21 @@ func TestBeaconIsNotAModeReply(t *testing.T) {
 	}
 }
 
+func TestReadPacketSendsNothing(t *testing.T) {
+	f := &fakeStream{chunks: [][]byte{{0x1f, 0x03}, {0x03, 0x01, 0x02}}}
+	c := NewClient(f)
+	p, err := c.ReadPacket()
+	if err != nil || p.String() != "[31.3] op 3: 02" {
+		t.Errorf("got %v, %v", p, err)
+	}
+	if _, err := c.ReadPacket(); !errors.Is(err, ErrNoReply) {
+		t.Errorf("empty stream: err = %v, want ErrNoReply", err)
+	}
+	if len(f.written) != 0 {
+		t.Errorf("wrote % x", f.written)
+	}
+}
+
 func TestCurrentModeErrors(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
