@@ -1,6 +1,8 @@
-// Package bose reads the listening mode of Bose QC Ultra Earbuds (2nd Gen)
-// over BMAP, the protocol the Bose app speaks over RFCOMM. The protocol notes
-// come from aaronsb/bosectl (https://github.com/aaronsb/bosectl, MIT).
+// Package bose reads the listening mode of Bose QC Ultra Earbuds and QC Ultra
+// Headphones (both 2nd Gen) over BMAP, the protocol the Bose app speaks over
+// RFCOMM. The protocol notes come from aaronsb/bosectl
+// (https://github.com/aaronsb/bosectl, MIT), which documents the same
+// AudioModes layout for both.
 //
 // Packet layout:
 //
@@ -16,6 +18,35 @@ import (
 	"fmt"
 	"strings"
 )
+
+// Device is one of the Bose devices this package talks to.
+type Device struct {
+	Name string // what the user calls it: "earbuds" or "headphones"
+	Addr uint64 // Bluetooth address
+}
+
+func (d Device) String() string { return "Bose " + d.Name }
+
+// The paired devices on this PC. Dial connects to no other address.
+var (
+	// QC Ultra Earbuds (2nd Gen), product ID 0x4062; bosectl's "edith".
+	Earbuds = Device{Name: "earbuds", Addr: 0x68F21F3B5CB7}
+	// QC Ultra Headphones (2nd Gen), product ID 0x4082; bosectl's
+	// "wolverine".
+	Headphones = Device{Name: "headphones", Addr: 0x68F21F0DF042}
+
+	Devices = []Device{Earbuds, Headphones}
+)
+
+// DeviceNamed returns the device called name.
+func DeviceNamed(name string) (Device, bool) {
+	for _, d := range Devices {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return Device{}, false
+}
 
 // Operators, from bosectl's notes.
 const (
@@ -39,7 +70,7 @@ const (
 
 // presetModes are the firmware's fixed modes, by index. Indices from 4 up are
 // slots for modes made in the Bose app (the earbuds come with "Work" in
-// slot 4); their names are stored on the earbuds.
+// slot 4); their names are stored on the device.
 var presetModes = []string{"Quiet", "Aware", "Immersion", "Cinema"}
 
 // presetName returns the name of the preset mode at idx, if it is one.
@@ -70,7 +101,7 @@ func modeConfigName(payload []byte) (string, error) {
 	return strings.ToValidUTF8(string(name), "?"), nil
 }
 
-// Request names one of the packets the earbuds may be sent.
+// Request names one of the packets a device may be sent.
 type Request int
 
 const (
@@ -88,9 +119,9 @@ func (r Request) String() string {
 	return fmt.Sprintf("Request(%d)", int(r))
 }
 
-// The only packets the earbuds may be sent, both without payload:
+// The only packets a device may be sent, both without payload:
 //   - a GET of AudioModes.CurrentMode;
-//   - a START of AudioModes.GetAll, which makes the earbuds report every
+//   - a START of AudioModes.GetAll, which makes the device report every
 //     mode's settings. START is also the operator that switches modes on
 //     other functions, so only this exact packet is allowed.
 var (
@@ -121,7 +152,7 @@ func CheckOutgoing(p []byte) error {
 }
 
 // MustAllow panics unless p is exactly one of the allowed packets. Every
-// write to the earbuds goes through it.
+// write to a device goes through it.
 func MustAllow(p []byte) {
 	if err := CheckOutgoing(p); err != nil {
 		panic(err)

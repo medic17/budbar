@@ -29,11 +29,24 @@ func TestRunMode(t *testing.T) {
 	if code := run([]string{"-trace", "mode"}, dial, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d, stderr %q", code, stderr.String())
 	}
-	if stdout.String() != "Cinema\n" || len(dialed) != 1 || dialed[0] != bose.BudsAddr || !conn.closed {
+	if stdout.String() != "Cinema\n" || len(dialed) != 1 || dialed[0] != bose.Earbuds.Addr || !conn.closed {
 		t.Errorf("stdout %q, dialed %X, closed %v", stdout.String(), dialed, conn.closed)
 	}
 	if !strings.Contains(stderr.String(), "recv  5 bytes: 1f 03 03 01 03") {
 		t.Errorf("trace missing reply: %q", stderr.String())
+	}
+}
+
+func TestRunDeviceHeadphones(t *testing.T) {
+	conn := &fakeConn{reply: bytes.NewReader([]byte{0x1f, 0x03, 0x03, 0x01, 0x00})}
+	var dialed []uint64
+	dial := func(addr uint64) (io.ReadWriteCloser, error) { dialed = append(dialed, addr); return conn, nil }
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"-device", "headphones", "mode"}, dial, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	if stdout.String() != "Quiet\n" || len(dialed) != 1 || dialed[0] != bose.Headphones.Addr {
+		t.Errorf("stdout %q, dialed %X", stdout.String(), dialed)
 	}
 }
 
@@ -74,7 +87,10 @@ func TestRunWatchStopsAtDeadline(t *testing.T) {
 
 func TestRunBadArgsNeverDial(t *testing.T) {
 	dial := func(uint64) (io.ReadWriteCloser, error) { t.Fatal("dialed"); return nil, nil }
-	for _, args := range [][]string{nil, {"status"}, {"mode", "x"}, {"-x", "mode"}} {
+	for _, args := range [][]string{
+		nil, {"status"}, {"mode", "x"}, {"-x", "mode"},
+		{"-device", "shokz", "mode"}, {"-device", "", "mode"}, {"-device", "Headphones", "mode"},
+	} {
 		if code := run(args, dial, io.Discard, io.Discard); code != 2 {
 			t.Errorf("%q: exit %d, want 2", args, code)
 		}

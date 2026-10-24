@@ -172,13 +172,13 @@ type boseIconKey struct {
 	dark, dim bool
 }
 
-// The tray shows one pair of earbuds at a time: the Bose earbuds while they
-// are connected, otherwise the Shokz Dolby state as before. Both pairs are
-// never connected to this PC at once.
+// The tray shows one device at a time: a connected Bose device (the one that
+// connected last, if both are), otherwise the Shokz Dolby state as before.
+// The Shokz and a Bose device are not connected to this PC at once.
 type tray struct {
 	hwnd           windows.HWND
 	agent          *agent
-	bose           *boseAgent
+	bose           []*boseAgent // one per device in bose.Devices
 	log            *appLog
 	taskbarCreated uint32
 	icons          map[iconKey]windows.Handle
@@ -187,9 +187,9 @@ type tray struct {
 	hotkeyErr      error
 	radio          windows.Handle
 
-	mu         sync.Mutex
-	status     Status
-	boseStatus BoseStatus
+	mu     sync.Mutex
+	status Status
+	shown  boseShown
 }
 
 // theTray is the single instance the window procedure dispatches to; Windows
@@ -211,23 +211,35 @@ func runTray(dial dialFunc, stderr io.Writer) int {
 	t := &tray{log: log}
 	theTray = t
 	t.agent = newAgent(dial, earbudsConnected, log, t.SetStatus)
-	t.bose = newBoseAgent(bose.Dial, bose.Connected, log, t.SetBoseStatus)
+	boseAddrs := ""
+	for _, d := range bose.Devices {
+		probe := func() (bool, error) { return bose.Connected(d.Addr) }
+		publish := func(s BoseStatus) { t.SetBoseStatus(d.Addr, s) }
+		t.bose = append(t.bose, newBoseAgent(d, bose.Dial, probe, log, publish))
+		boseAddrs += fmt.Sprintf(", %v %012X", d, d.Addr)
+	}
 	if err := t.create(); err != nil {
 		t.logf("tray setup failed: %v", err)
 		fmt.Fprintln(stderr, "budbar: tray setup failed:", err)
 		return 1
 	}
-	t.logf("tray started (pid %d, Shokz %012X, Bose %012X, dark taskbar %t)",
-		os.Getpid(), earbudsAddr, bose.BudsAddr, t.dark)
+	t.logf("tray started (pid %d, Shokz %012X%s, dark taskbar %t)",
+		os.Getpid(), earbudsAddr, boseAddrs, t.dark)
 	if t.hotkeyErr != nil {
 		t.logf("Ctrl+Q not available: %v", t.hotkeyErr)
 	}
 	t.agent.Check("startup")
-	t.bose.Check("startup")
+	for _, b := range t.bose {
+		b.Check("startup")
+	}
 	t.loop()
-	t.bose.Stop()
+	for _, b := range t.bose {
+		b.Stop()
+	}
 	t.agent.Wait()
-	t.bose.Wait()
+	for _, b := range t.bose {
+		b.Wait()
+	}
 	t.logf("tray exited")
 	return 0
 }
@@ -261,10 +273,10 @@ func (t *tray) SetStatus(s Status) {
 	procPostMessageW.Call(uintptr(t.hwnd), wmRefresh, 0, 0)
 }
 
-// SetBoseStatus is SetStatus for the Bose agent.
-func (t *tray) SetBoseStatus(s BoseStatus) {
+// SetBoseStatus is SetStatus for the agent of the Bose device at addr.
+func (t *tray) SetBoseStatus(addr uint64, s BoseStatus) {
 	t.mu.Lock()
-	t.boseStatus = s
+	t.shown.set(addr, s)
 	t.mu.Unlock()
 	procPostMessageW.Call(uintptr(t.hwnd), wmRefresh, 0, 0)
 }
@@ -342,17 +354,27 @@ func (t *tray) current() Status {
 	return t.status
 }
 
-func (t *tray) currentBose() BoseStatus {
+// currentBose returns the agent and status of the Bose device the tray
+// shows, or a nil agent while none is connected.
+func (t *tray) currentBose() (*boseAgent, BoseStatus) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.boseStatus
+	addr, s, ok := t.shown.current()
+	t.mu.Unlock()
+	if ok {
+		for _, a := range t.bose {
+			if a.dev.Addr == addr {
+				return a, s
+			}
+		}
+	}
+	return nil, BoseStatus{}
 }
 
-// look returns the icon and the two text lines for the pair the tray shows:
-// the Bose earbuds while they are connected, otherwise the Shokz.
+// look returns the icon and the two text lines for the device the tray
+// shows: a connected Bose device, otherwise the Shokz.
 func (t *tray) look() (icon windows.Handle, head, detail string) {
-	if b := t.currentBose(); b.Connected {
-		return t.boseIcons[boseIconKey{t.dark, b.Failed}], boseHeadline(b), b.Detail
+	if a, b := t.currentBose(); a != nil {
+		return t.boseIcons[boseIconKey{t.dark, b.Failed}], boseHeadline(a.dev, b), b.Detail
 	}
 	s := t.current()
 	return t.icons[iconKey{s.State, s.Busy}], headline(s), detailLine(s)
@@ -409,17 +431,18 @@ func detailLine(s Status) string {
 	return s.Detail
 }
 
-// boseHeadline is the Bose earbuds' first line: their mode once read.
-func boseHeadline(b BoseStatus) string {
+// boseHeadline is a Bose device's first line: its name and, once read, its
+// mode.
+func boseHeadline(dev bose.Device, b BoseStatus) string {
 	if b.Mode == "" {
-		return "Bose mode: reading..."
+		return dev.String() + ": reading..."
 	}
-	return "Bose mode: " + b.Mode
+	return dev.String() + ": " + b.Mode
 }
 
 func (t *tray) showMenu(x, y int32) {
 	s := t.current()
-	b := t.currentBose()
+	ba, _ := t.currentBose()
 	_, head, detail := t.look()
 
 	m, _, _ := procCreatePopupMenu.Call()
@@ -443,8 +466,8 @@ func (t *tray) showMenu(x, y int32) {
 	ready := s.Connected && !s.Busy
 	add(enabled(ready && s.State != stateOn), cmdTurnOn, "Turn on")
 	add(enabled(ready && s.State != stateOff), cmdTurnOff, "Turn off")
-	add(enabled(ready || b.Connected), cmdRefresh, "Refresh")
-	add(enabled(b.Connected), cmdRefreshModes, "Refresh modes")
+	add(enabled(ready || ba != nil), cmdRefresh, "Refresh")
+	add(enabled(ba != nil), cmdRefreshModes, "Refresh modes")
 	add(mfString, cmdOpenLog, "Open log")
 	add(mfSeparator, 0, "")
 	add(mfString, cmdExit, "Exit")
@@ -460,13 +483,15 @@ func (t *tray) showMenu(x, y int32) {
 	case cmdTurnOff:
 		t.agent.Do(actOff, "menu")
 	case cmdRefresh:
-		if b.Connected {
-			t.bose.Refresh("menu", false)
+		if ba != nil {
+			ba.Refresh("menu", false)
 		} else {
 			t.agent.Do(actRefresh, "menu")
 		}
 	case cmdRefreshModes:
-		t.bose.Refresh("menu: refresh modes", true)
+		if ba != nil {
+			ba.Refresh("menu: refresh modes", true)
+		}
 	case cmdOpenLog:
 		openLog()
 	case cmdExit:
@@ -483,7 +508,7 @@ func openLog() {
 
 // onDeviceChange handles the radio's Bluetooth events. Every HCI event is
 // logged with what BluetoothGetDeviceInfo reports for the Shokz at that
-// moment. Either pair's ACL connect schedules a read; its disconnect shows
+// moment. Each device's ACL connect schedules a read; its disconnect shows
 // it as not connected.
 func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 	if wparam != dbtCustomEvent || lparam == 0 {
@@ -506,10 +531,14 @@ func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 		t.agent.Connected("earbuds connected", connectSettle)
 	case ev.Addr == earbudsAddr:
 		t.agent.Disconnected("disconnected")
-	case ev.Addr == bose.BudsAddr && ev.Connected:
-		t.bose.Connected("earbuds connected", connectSettle)
-	case ev.Addr == bose.BudsAddr:
-		t.bose.Disconnected("disconnected")
+	}
+	for _, b := range t.bose {
+		switch {
+		case ev.Addr == b.dev.Addr && ev.Connected:
+			b.Connected(b.dev.Name+" connected", connectSettle)
+		case ev.Addr == b.dev.Addr:
+			b.Disconnected("disconnected")
+		}
 	}
 }
 
@@ -519,12 +548,16 @@ func (t *tray) onPower(wparam uintptr) {
 	switch wparam {
 	case pbtAPMSuspend:
 		t.agent.Disconnected("sleep")
-		t.bose.Disconnected("sleep")
+		for _, b := range t.bose {
+			b.Disconnected("sleep")
+		}
 	case pbtAPMResumeAutomatic:
 		t.logf("resumed; checking the connections in %s", resumeSettle)
 		time.AfterFunc(resumeSettle, func() {
 			t.agent.Check("resume")
-			t.bose.Check("resume")
+			for _, b := range t.bose {
+				b.Check("resume")
+			}
 		})
 	}
 }

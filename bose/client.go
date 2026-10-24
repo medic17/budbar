@@ -6,8 +6,8 @@ import (
 	"io"
 )
 
-// ErrNoReply means the earbuds sent nothing before the read timeout.
-var ErrNoReply = errors.New("no reply from earbuds")
+// ErrNoReply means the device sent nothing before the read timeout.
+var ErrNoReply = errors.New("no reply from the Bose device")
 
 const (
 	readSize = 512
@@ -16,7 +16,7 @@ const (
 	maxPerRequest = 16 << 10
 )
 
-// Client reads the earbuds' state over an open RFCOMM stream.
+// Client reads a device's state over an open RFCOMM stream.
 type Client struct {
 	rw  io.ReadWriter
 	buf []byte
@@ -41,7 +41,7 @@ func (c *Client) CurrentMode() (int, error) {
 }
 
 // ModeName returns the name of the mode at index idx. Presets have fixed
-// names; for other modes it asks the earbuds for every mode's settings and
+// names; for other modes it asks the device for every mode's settings and
 // reads the name stored for idx.
 func (c *Client) ModeName(idx int) (string, error) {
 	if name, ok := presetName(idx); ok {
@@ -86,12 +86,12 @@ func (c *Client) request(r Request, want func(Packet) bool) (Packet, error) {
 			return p, nil
 		}
 		if p.Op == OpError && p.Block == sent[0] && p.Func == sent[1] {
-			return Packet{}, fmt.Errorf("%s: earbuds answered with error % x", r, p.Payload)
+			return Packet{}, fmt.Errorf("%s: device answered with error % x", r, p.Payload)
 		}
 	}
 }
 
-// ReadPacket returns the next packet the earbuds send, waiting for one if
+// ReadPacket returns the next packet the device sends, waiting for one if
 // none is buffered. It sends nothing.
 func (c *Client) ReadPacket() (Packet, error) {
 	for {
@@ -125,7 +125,7 @@ func (c *Client) fill() (int, error) {
 	case n > 0:
 		return n, nil
 	case err == nil, errors.Is(err, io.EOF):
-		return 0, errors.New("earbuds closed the connection")
+		return 0, errors.New("the Bose device closed the connection")
 	}
 	return 0, err
 }

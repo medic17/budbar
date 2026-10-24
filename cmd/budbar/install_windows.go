@@ -76,7 +76,7 @@ func taskXML(exe, args, user string) string {
 	return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
-    <Description>budbar: tray icon that shows and switches Dolby Audio on the Shokz OpenFit 2+ earbuds (Ctrl+Q toggles) and shows the Bose QC Ultra Earbuds' listening mode.</Description>
+    <Description>budbar: tray icon that shows and switches Dolby Audio on the Shokz OpenFit 2+ earbuds (Ctrl+Q toggles) and shows the listening mode of the Bose QC Ultra Earbuds and Headphones.</Description>
     <URI>\` + taskName + `</URI>
   </RegistrationInfo>
   <Triggers>

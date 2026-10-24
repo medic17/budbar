@@ -124,8 +124,12 @@ func (ft *fakeTimers) fire(t *testing.T, a *boseAgent) time.Duration {
 }
 
 func newTestBoseAgent(dial dialFunc) (*boseAgent, *fakeTimers) {
+	return newTestBoseAgentFor(bose.Earbuds, dial)
+}
+
+func newTestBoseAgentFor(dev bose.Device, dial dialFunc) (*boseAgent, *fakeTimers) {
 	ft := &fakeTimers{}
-	a := newBoseAgent(dial, func() (bool, error) { return true, nil }, io.Discard, func(BoseStatus) {})
+	a := newBoseAgent(dev, dial, func() (bool, error) { return true, nil }, io.Discard, func(BoseStatus) {})
 	a.after = ft.after
 	a.now = func() time.Time { return time.Date(2026, 10, 16, 14, 30, 0, 0, time.Local) }
 	return a, ft
@@ -262,11 +266,70 @@ func TestBoseReason(t *testing.T) {
 		want string
 	}{
 		{windows.WSAEHOSTDOWN, "Bose app"},
-		{bose.ErrNoReply, "no reply"},
+		{bose.ErrNoReply, "no reply from the headphones"},
+		{bose.ErrNotConnected, "headphones not connected"},
 		{errors.New("something else"), "something else"},
 	} {
-		if got := boseReason(tc.err); !strings.Contains(got, tc.want) {
+		if got := boseReason(bose.Headphones, tc.err); !strings.Contains(got, tc.want) {
 			t.Errorf("boseReason(%v) = %q", tc.err, got)
 		}
+	}
+}
+
+// The headphones' agent dials their address and names them in its log.
+func TestBoseAgentUsesItsDevice(t *testing.T) {
+	buds := &boseBuds{mode: 3, names: budsNames}
+	var dialed []uint64
+	a, ft := newTestBoseAgentFor(bose.Headphones, func(addr uint64) (io.ReadWriteCloser, error) {
+		dialed = append(dialed, addr)
+		return buds, nil
+	})
+	var log bytes.Buffer
+	a.log = &log
+	a.Connected("headphones connected", 0)
+	ft.fire(t, a)
+	if s := a.Status(); s.Mode != "Cinema" || len(dialed) != 1 || dialed[0] != bose.Headphones.Addr {
+		t.Errorf("status %+v, dialed %X", s, dialed)
+	}
+	if !strings.Contains(log.String(), "Bose headphones mode 3: Cinema") {
+		t.Errorf("log %q", log.String())
+	}
+	a.Disconnected("disconnected")
+	if s := a.Status(); !strings.HasPrefix(s.Detail, "Bose headphones not connected") {
+		t.Errorf("after disconnect: %+v", s)
+	}
+}
+
+func TestBoseShownPicksLastConnected(t *testing.T) {
+	buds, hp := bose.Earbuds.Addr, bose.Headphones.Addr
+	var b boseShown
+	if _, _, ok := b.current(); ok {
+		t.Fatal("zero value shows a device")
+	}
+	want := func(step string, addr uint64, mode string) {
+		t.Helper()
+		got, s, ok := b.current()
+		if !ok || got != addr || s.Mode != mode {
+			t.Errorf("%s: showing %012X %+v (ok %t), want %012X %q", step, got, s, ok, addr, mode)
+		}
+	}
+
+	b.set(buds, BoseStatus{Connected: true, Mode: "Work"})
+	want("earbuds on", buds, "Work")
+	b.set(hp, BoseStatus{Connected: true})
+	want("headphones on too", hp, "")
+	// A later check of the earbuds does not take the tray back.
+	b.set(buds, BoseStatus{Connected: true, Mode: "Quiet"})
+	b.set(hp, BoseStatus{Connected: true, Mode: "Aware"})
+	want("both polled", hp, "Aware")
+	b.set(hp, BoseStatus{Detail: "not connected"})
+	want("headphones off", buds, "Quiet")
+	// Reconnecting makes the headphones the latest again.
+	b.set(hp, BoseStatus{Connected: true, Mode: "Cinema"})
+	want("headphones back", hp, "Cinema")
+	b.set(hp, BoseStatus{})
+	b.set(buds, BoseStatus{})
+	if _, _, ok := b.current(); ok {
+		t.Error("shows a device while none is connected")
 	}
 }

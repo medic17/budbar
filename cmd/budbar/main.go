@@ -12,6 +12,15 @@
 // The exe's manifest (budbar.manifest, embedded via the generated .syso)
 // marks it detached: it uses the console of the terminal that starts it, and
 // gets no console window when the logon task or Explorer starts it.
+//
+// Release build, then install from the built exe:
+//
+//	go build -trimpath -ldflags "-s -w" -o budbar.exe ./cmd/budbar
+//	.\budbar.exe install
+//
+// -s -w drop the symbol table and debug info; -trimpath keeps local source
+// paths out of the exe. Go optimizes every build, so these change size, not
+// speed.
 package main
 
 //go:generate go run github.com/akavel/rsrc@v0.10.2 -manifest budbar.manifest -o rsrc_windows_amd64.syso

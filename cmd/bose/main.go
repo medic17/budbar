@@ -1,13 +1,14 @@
-// Command bose reads the listening mode of Bose QC Ultra Earbuds (2nd Gen)
-// over Bluetooth RFCOMM from Windows.
+// Command bose reads the listening mode of Bose QC Ultra Earbuds or QC Ultra
+// Headphones (both 2nd Gen) over Bluetooth RFCOMM from Windows.
 //
-//	bose [-trace] [-for duration] mode|watch
+//	bose [-device earbuds|headphones] [-trace] [-for duration] mode|watch
 //
-// It talks only to the earbuds at bose.BudsAddr, only while they are connected to
-// this PC, and sends only read requests. mode prints the active mode's name;
-// for a mode made in the Bose app, the name stored on the earbuds. watch
-// prints the active mode's index, then keeps the connection open and prints
-// every packet the earbuds send for the -for duration.
+// It talks only to the device in bose.Devices that -device names (default
+// earbuds), only while it is connected to this PC, and sends only read
+// requests. mode prints the active mode's name; for a mode made in the Bose
+// app, the name stored on the device. watch prints the active mode's index,
+// then keeps the connection open and prints every packet the device sends
+// for the -for duration.
 package main
 
 import (
@@ -22,7 +23,7 @@ import (
 	"openfit-dolby/bt"
 )
 
-// dialFunc opens an RFCOMM stream to the earbuds at a Bluetooth address.
+// dialFunc opens an RFCOMM stream to the device at a Bluetooth address.
 type dialFunc func(addr uint64) (io.ReadWriteCloser, error)
 
 func main() {
@@ -34,10 +35,11 @@ func main() {
 func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("bose", flag.ContinueOnError)
 	fs.SetOutput(stderr)
+	device := fs.String("device", bose.Earbuds.Name, "which Bose device: earbuds or headphones")
 	trace := fs.Bool("trace", false, "log every byte sent and received to stderr")
 	watchFor := fs.Duration("for", 2*time.Minute, "how long watch listens")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: bose [-trace] [-for duration] mode|watch")
+		fmt.Fprintln(stderr, "usage: bose [-device earbuds|headphones] [-trace] [-for duration] mode|watch")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -56,13 +58,19 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
+	dev, ok := bose.DeviceNamed(*device)
+	if !ok {
+		fmt.Fprintf(stderr, "bose: unknown device %q\n", *device)
+		fs.Usage()
+		return 2
+	}
 
 	var tr *bt.Tracer
 	if *trace {
 		tr = bt.NewTracer(stderr)
-		tr.Logf("connecting to %012X", bose.BudsAddr)
+		tr.Logf("connecting to %v at %012X", dev, dev.Addr)
 	}
-	conn, err := dial(bose.BudsAddr)
+	conn, err := dial(dev.Addr)
 	if err != nil {
 		if tr != nil {
 			tr.Logf("connect failed: %v", err)
@@ -98,7 +106,7 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 // now is the clock watch uses; tests replace it.
 var now = time.Now
 
-// watch prints mode, then every packet the earbuds send on their own until d
+// watch prints mode, then every packet the device sends on its own until d
 // has passed. It sends nothing. The deadline is checked after each read, so
 // it can run over by up to one read timeout.
 func watch(c *bose.Client, mode int, d time.Duration, stdout, stderr io.Writer) int {
