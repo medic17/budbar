@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"openfit-dolby/bt"
+	"openfit-dolby/devices"
 )
 
 // bmapChannel is the RFCOMM channel that speaks BMAP on both devices. The
@@ -18,32 +19,25 @@ const bmapChannel = 2
 // ErrNotConnected means the device is not connected to this PC.
 var ErrNotConnected = errors.New("Bose device not connected to this PC")
 
-// connectedCheck reports whether the device at addr is connected; tests
-// replace it.
-var connectedCheck = Connected
+// targetStore and connectedCheck guard Dial; tests replace them.
+var (
+	targetStore    = devices.Default()
+	connectedCheck = Connected
+)
 
 // Connected asks Windows whether the device at addr is connected to this PC.
 // It only reads Windows' own records; nothing is sent over the air.
 func Connected(addr uint64) (bool, error) { return bt.Connected(addr) }
 
-// checkTarget returns an error unless addr is one of Devices.
-func checkTarget(addr uint64) error {
-	for _, d := range Devices {
-		if d.Addr == addr {
-			return nil
-		}
-	}
-	return fmt.Errorf("refusing to connect to %012X: not one of the known Bose devices", addr)
-}
-
-// Dial connects to the BMAP channel of the device at addr. It panics for any
-// address not in Devices. It connects only while the device is connected to
-// this PC: an RFCOMM connect to a disconnected device makes Windows page it,
-// which could pull the device away from the phone. The stream sends only the
-// requests CheckOutgoing allows.
+// Dial connects to the BMAP channel of the device at addr. It refuses unless
+// addr is an added Bose device that Windows' records still identify as its
+// model. It connects only while the device is connected to this PC: an
+// RFCOMM connect to a disconnected device makes Windows page it, which could
+// pull the device away from the phone. The stream sends only the requests
+// CheckOutgoing allows.
 func Dial(addr uint64) (io.ReadWriteCloser, error) {
-	if err := checkTarget(addr); err != nil {
-		panic(err)
+	if _, err := targetStore.Verify(addr, devices.Bose); err != nil {
+		return nil, err
 	}
 	ok, err := connectedCheck(addr)
 	if err != nil {

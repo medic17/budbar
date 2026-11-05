@@ -11,6 +11,7 @@ import (
 
 	"openfit-dolby/bose"
 	"openfit-dolby/bt"
+	"openfit-dolby/devices"
 )
 
 // How often the tray asks a Bose device for its mode while it is connected;
@@ -31,36 +32,37 @@ type BoseStatus struct {
 	Detail    string
 }
 
-// boseShown picks which Bose device the tray shows: of those connected, the
+// lastConnected picks which device the tray shows: of those connected, the
 // one that connected last. The zero value is ready to use.
-type boseShown struct {
-	seq    int
-	status map[uint64]BoseStatus // by device address
-	since  map[uint64]int        // seq at which each device last connected
+type lastConnected struct {
+	seq   int
+	since map[uint64]int // by device address: when it connected, 0 if not
 }
 
-// set records the status of the device at addr.
-func (b *boseShown) set(addr uint64, s BoseStatus) {
-	if b.status == nil {
-		b.status, b.since = map[uint64]BoseStatus{}, map[uint64]int{}
+// set records whether the device at addr is connected.
+func (l *lastConnected) set(addr uint64, connected bool) {
+	if l.since == nil {
+		l.since = map[uint64]int{}
 	}
-	if s.Connected && !b.status[addr].Connected {
-		b.seq++
-		b.since[addr] = b.seq
+	switch {
+	case !connected:
+		delete(l.since, addr)
+	case l.since[addr] == 0:
+		l.seq++
+		l.since[addr] = l.seq
 	}
-	b.status[addr] = s
 }
 
-// current returns the address and status of the device to show; ok is false
+// latest returns the address of the device that connected last; ok is false
 // while none is connected.
-func (b *boseShown) current() (addr uint64, s BoseStatus, ok bool) {
+func (l *lastConnected) latest() (addr uint64, ok bool) {
 	last := 0
-	for a, st := range b.status {
-		if st.Connected && b.since[a] > last {
-			addr, s, ok, last = a, st, true, b.since[a]
+	for a, s := range l.since {
+		if s > last {
+			addr, ok, last = a, true, s
 		}
 	}
-	return addr, s, ok
+	return addr, ok
 }
 
 // boseAgent reads one Bose device's mode in the background: once soon after
@@ -70,7 +72,7 @@ func (b *boseShown) current() (addr uint64, s BoseStatus, ok bool) {
 // check sends only the current-mode GET; a slot's name is fetched the first
 // time that slot is seen, and again after RefreshModes.
 type boseAgent struct {
-	dev     bose.Device
+	dev     devices.Device
 	dial    dialFunc
 	probe   func() (bool, error) // whether the device is connected
 	log     io.Writer            // gets the -trace output of every check
@@ -89,7 +91,7 @@ type boseAgent struct {
 	running sync.WaitGroup
 }
 
-func newBoseAgent(dev bose.Device, dial dialFunc, probe func() (bool, error), log io.Writer, publish func(BoseStatus)) *boseAgent {
+func newBoseAgent(dev devices.Device, dial dialFunc, probe func() (bool, error), log io.Writer, publish func(BoseStatus)) *boseAgent {
 	return &boseAgent{
 		dev: dev, dial: dial, probe: probe, log: log, publish: publish, now: time.Now,
 		after: func(d time.Duration, f func()) func() {
@@ -281,12 +283,12 @@ func (a *boseAgent) failed(err error) BoseStatus {
 
 // boseReason fits an error from dev into the tray's hover text; the log
 // keeps the full message.
-func boseReason(dev bose.Device, err error) string {
+func boseReason(dev devices.Device, err error) string {
 	switch {
 	case errors.Is(err, windows.WSAEHOSTDOWN):
 		return "can't connect: is the Bose app open?"
 	case errors.Is(err, bose.ErrNoReply):
-		return "no reply from the " + dev.Name
+		return "no reply from " + dev.Name
 	case errors.Is(err, bose.ErrNotConnected):
 		return dev.Name + " not connected"
 	}

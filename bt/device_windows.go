@@ -2,7 +2,6 @@ package bt
 
 import (
 	"fmt"
-	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -48,10 +47,9 @@ func Connected(addr uint64) (bool, error) {
 		return false, err
 	}
 	defer windows.CloseHandle(radio)
-	info := deviceInfo{Address: addr}
-	info.Size = uint32(unsafe.Sizeof(info))
-	if r, _, _ := procBluetoothGetDeviceInfo.Call(uintptr(radio), uintptr(unsafe.Pointer(&info))); r != 0 {
-		return false, fmt.Errorf("BluetoothGetDeviceInfo: %w", syscall.Errno(r))
+	info, err := getDeviceInfo(radio, addr)
+	if err != nil {
+		return false, err
 	}
 	return info.Connected != 0, nil
 }

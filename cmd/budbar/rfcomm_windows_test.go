@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"openfit-dolby/devices"
+	"openfit-dolby/devices/devicestest"
 )
 
 func TestConnectErrorHintsAtShokzApp(t *testing.T) {
@@ -15,46 +18,49 @@ func TestConnectErrorHintsAtShokzApp(t *testing.T) {
 	}
 }
 
-func TestCheckTarget(t *testing.T) {
-	if err := checkTarget(earbudsAddr); err != nil {
-		t.Errorf("tested earbuds refused: %v", err)
-	}
-	for _, addr := range []uint64{0, earbudsAddr ^ 1, earbudsAddr ^ 1<<47, 0xFFFFFFFFFFFF, 0x2F6375E20CA0} {
-		if checkTarget(addr) == nil {
-			t.Errorf("%012X allowed", addr)
-		}
-	}
+// withGuard sets the store dialRFCOMM checks and records every connection
+// check, answering with connected and err.
+func withGuard(t *testing.T, s devices.Store, connected bool, err error) *[]uint64 {
+	var checked []uint64
+	oldStore, oldCheck := targetStore, connectedCheck
+	t.Cleanup(func() { targetStore, connectedCheck = oldStore, oldCheck })
+	targetStore = s
+	connectedCheck = func(addr uint64) (bool, error) { checked = append(checked, addr); return connected, err }
+	return &checked
 }
 
-// The address guard runs first: another address panics before the
-// connection check or any socket.
-func TestDialPanicsForOtherAddress(t *testing.T) {
-	checked := false
-	defer func(old func() (bool, error)) { connectedCheck = old }(connectedCheck)
-	connectedCheck = func() (bool, error) { checked = true; return true, nil }
-	defer func() {
-		if recover() == nil {
-			t.Error("dialRFCOMM did not panic")
+// The device guard runs first: anything but an added Shokz device is refused
+// before the connection check or any socket.
+func TestDialRefusesOtherDevices(t *testing.T) {
+	s := devicestest.Store(t, devicestest.AllPaired, devicestest.BoseBudsDevice)
+	checked := withGuard(t, s, true, nil)
+	for name, addr := range map[string]uint64{
+		"Shokz not added":  devicestest.ShokzDevice.Addr,
+		"a Bose device":    devicestest.BoseBudsDevice.Addr,
+		"untested earbuds": devicestest.JBLTunePaired.Addr,
+		"unknown address":  0,
+	} {
+		if _, err := dialRFCOMM(addr); err == nil || errors.Is(err, errNotConnected) {
+			t.Errorf("%s: err = %v, want a refusal", name, err)
 		}
-		if checked {
-			t.Error("checked the connection before refusing the address")
-		}
-	}()
-	dialRFCOMM(earbudsAddr ^ 1)
+	}
+	if len(*checked) != 0 {
+		t.Errorf("checked the connection of %X before refusing", *checked)
+	}
 }
 
 func TestDialRefusesWhenNotConnected(t *testing.T) {
-	defer func(old func() (bool, error)) { connectedCheck = old }(connectedCheck)
-	connectedCheck = func() (bool, error) { return false, nil }
-	if _, err := dialRFCOMM(earbudsAddr); !errors.Is(err, errNotConnected) {
-		t.Errorf("err = %v, want errNotConnected", err)
+	s := devicestest.Store(t, devicestest.AllPaired, devicestest.ShokzDevice)
+	addr := devicestest.ShokzDevice.Addr
+	checked := withGuard(t, s, false, nil)
+	if _, err := dialRFCOMM(addr); !errors.Is(err, errNotConnected) || len(*checked) != 1 || (*checked)[0] != addr {
+		t.Errorf("err = %v, checked %X; want errNotConnected after checking %X", err, *checked, addr)
 	}
-	connectedCheck = func() (bool, error) { return false, errors.New("no radio") }
-	if _, err := dialRFCOMM(earbudsAddr); err == nil || !strings.Contains(err.Error(), "no radio") {
+	withGuard(t, s, false, errors.New("no radio"))
+	if _, err := dialRFCOMM(addr); err == nil || !strings.Contains(err.Error(), "no radio") {
 		t.Errorf("err = %v, want the check's error", err)
 	}
 }
-
 func TestConnectErrorOtherErrorsHaveNoHint(t *testing.T) {
 	err := connectError(windows.WSAETIMEDOUT)
 	if strings.Contains(err.Error(), "Shokz app") || !errors.Is(err, windows.WSAETIMEDOUT) {

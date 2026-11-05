@@ -1,7 +1,7 @@
 package main
 
-// Whether the earbuds are connected to this PC: a query for the current state
-// and events for changes.
+// Whether the devices are connected to this PC: a query for the current state
+// (bt.Connected) and events for changes.
 //
 // Windows reports ACL connects and disconnects of remote devices as
 // WM_DEVICECHANGE / DBT_CUSTOMEVENT with GUID_BLUETOOTH_HCI_EVENT, but only to
@@ -21,12 +21,6 @@ import (
 )
 
 var procRegisterDeviceNotificationW = user32.NewProc("RegisterDeviceNotificationW")
-
-// earbudsConnected asks Windows whether the earbuds are connected to this PC.
-// It only reads Windows' own records; nothing is sent over the air.
-func earbudsConnected() (bool, error) {
-	return bt.Connected(earbudsAddr)
-}
 
 const (
 	wmDeviceChange   = 0x0219

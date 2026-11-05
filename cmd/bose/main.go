@@ -1,14 +1,15 @@
 // Command bose reads the listening mode of Bose QC Ultra Earbuds or QC Ultra
 // Headphones (both 2nd Gen) over Bluetooth RFCOMM from Windows.
 //
-//	bose [-device earbuds|headphones] [-trace] [-for duration] mode|watch
+//	bose [-device name] [-trace] [-for duration] mode|watch
 //
-// It talks only to the device in bose.Devices that -device names (default
-// earbuds), only while it is connected to this PC, and sends only read
-// requests. mode prints the active mode's name; for a mode made in the Bose
-// app, the name stored on the device. watch prints the active mode's index,
-// then keeps the connection open and prints every packet the device sends
-// for the -for duration.
+// It talks only to a Bose device added with budbar add, only while it is
+// connected to this PC, and sends only read requests. -device picks one by
+// part of its name or its address; without it, the only Bose device added,
+// or of several the one connected now. mode prints the active mode's name;
+// for a mode made in the Bose app, the name stored on the device. watch
+// prints the active mode's index, then keeps the connection open and prints
+// every packet the device sends for the -for duration.
 package main
 
 import (
@@ -21,10 +22,18 @@ import (
 
 	"openfit-dolby/bose"
 	"openfit-dolby/bt"
+	"openfit-dolby/devices"
 )
 
 // dialFunc opens an RFCOMM stream to the device at a Bluetooth address.
 type dialFunc func(addr uint64) (io.ReadWriteCloser, error)
+
+// The device list and connection check -device picks from; tests replace
+// them.
+var (
+	store     = devices.Default()
+	connected = bose.Connected
+)
 
 func main() {
 	os.Exit(run(os.Args[1:], bose.Dial, os.Stdout, os.Stderr))
@@ -35,11 +44,11 @@ func main() {
 func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("bose", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	device := fs.String("device", bose.Earbuds.Name, "which Bose device: earbuds or headphones")
+	device := fs.String("device", "", "which added Bose device: part of its name, or its address")
 	trace := fs.Bool("trace", false, "log every byte sent and received to stderr")
 	watchFor := fs.Duration("for", 2*time.Minute, "how long watch listens")
 	fs.Usage = func() {
-		fmt.Fprintln(stderr, "usage: bose [-device earbuds|headphones] [-trace] [-for duration] mode|watch")
+		fmt.Fprintln(stderr, "usage: bose [-device name] [-trace] [-for duration] mode|watch")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -58,11 +67,15 @@ func run(args []string, dial dialFunc, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
-	dev, ok := bose.DeviceNamed(*device)
-	if !ok {
-		fmt.Fprintf(stderr, "bose: unknown device %q\n", *device)
-		fs.Usage()
-		return 2
+	list, err := store.Load()
+	if err != nil {
+		fmt.Fprintln(stderr, "bose:", err)
+		return 1
+	}
+	dev, err := devices.Pick(list, devices.Bose, *device, connected)
+	if err != nil {
+		fmt.Fprintln(stderr, "bose:", err)
+		return 1
 	}
 
 	var tr *bt.Tracer

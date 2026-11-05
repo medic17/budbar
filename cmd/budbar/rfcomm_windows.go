@@ -8,6 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"openfit-dolby/bt"
+	"openfit-dolby/devices"
 	"openfit-dolby/shokz"
 )
 
@@ -21,26 +22,22 @@ var shokzService = windows.GUID{
 // errNotConnected means the earbuds are not connected to this PC.
 var errNotConnected = errors.New("earbuds not connected to this PC")
 
-// connectedCheck reports whether the earbuds are connected; tests replace it.
-var connectedCheck = earbudsConnected
+// targetStore and connectedCheck guard dialRFCOMM; tests replace them.
+var (
+	targetStore    = devices.Default()
+	connectedCheck = bt.Connected
+)
 
-// checkTarget returns an error unless addr is the tested earbuds' address.
-func checkTarget(addr uint64) error {
-	if addr != earbudsAddr {
-		return fmt.Errorf("refusing to connect to %012X: only %012X has been tested", addr, earbudsAddr)
-	}
-	return nil
-}
-
-// dialRFCOMM connects to the earbuds' Shokz service. It panics for any other
-// address, so even a bug elsewhere cannot send the captured frames to another
-// device. It connects only while the earbuds are connected to this PC, and
-// the stream sends only the captured frames.
+// dialRFCOMM connects to the Shokz service of the earbuds at addr. It refuses
+// unless addr is an added Shokz device that Windows' records still identify
+// as its model, so even a bug elsewhere cannot send the captured frames to
+// another device. It connects only while the earbuds are connected to this
+// PC, and the stream sends only the captured frames.
 func dialRFCOMM(addr uint64) (io.ReadWriteCloser, error) {
-	if err := checkTarget(addr); err != nil {
-		panic(err)
+	if _, err := targetStore.Verify(addr, devices.Shokz); err != nil {
+		return nil, err
 	}
-	ok, err := connectedCheck()
+	ok, err := connectedCheck(addr)
 	if err != nil {
 		return nil, fmt.Errorf("checking the earbuds' connection: %w", err)
 	}
@@ -48,7 +45,7 @@ func dialRFCOMM(addr uint64) (io.ReadWriteCloser, error) {
 		return nil, errNotConnected
 	}
 	c, err := bt.Dial(bt.Config{
-		Addr:       earbudsAddr,
+		Addr:       addr,
 		Service:    shokzService,
 		Allow:      shokz.MustAllow,
 		ErrNoReply: shokz.ErrNoReply,

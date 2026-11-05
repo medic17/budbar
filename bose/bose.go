@@ -19,35 +19,6 @@ import (
 	"strings"
 )
 
-// Device is one of the Bose devices this package talks to.
-type Device struct {
-	Name string // what the user calls it: "earbuds" or "headphones"
-	Addr uint64 // Bluetooth address
-}
-
-func (d Device) String() string { return "Bose " + d.Name }
-
-// The paired devices on this PC. Dial connects to no other address.
-var (
-	// QC Ultra Earbuds (2nd Gen), product ID 0x4062; bosectl's "edith".
-	Earbuds = Device{Name: "earbuds", Addr: 0x68F21F3B5CB7}
-	// QC Ultra Headphones (2nd Gen), product ID 0x4082; bosectl's
-	// "wolverine".
-	Headphones = Device{Name: "headphones", Addr: 0x68F21F0DF042}
-
-	Devices = []Device{Earbuds, Headphones}
-)
-
-// DeviceNamed returns the device called name.
-func DeviceNamed(name string) (Device, bool) {
-	for _, d := range Devices {
-		if d.Name == name {
-			return d, true
-		}
-	}
-	return Device{}, false
-}
-
 // Operators, from bosectl's notes.
 const (
 	OpSet        = 0

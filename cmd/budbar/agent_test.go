@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"openfit-dolby/devices/devicestest"
 	"openfit-dolby/shokz"
 )
 
@@ -111,7 +112,7 @@ func (r *recorder) all() []Status {
 func testAgent(dial dialFunc) (*agent, *recorder, *syncBuilder) {
 	rec := &recorder{}
 	log := &syncBuilder{}
-	a := newAgent(dial, func() (bool, error) { return true, nil }, log, rec.publish)
+	a := newAgent(devicestest.ShokzDevice, dial, func() (bool, error) { return true, nil }, log, rec.publish)
 	a.now = func() time.Time { return time.Date(2026, 10, 3, 14, 2, 0, 0, time.Local) }
 	a.status.Connected = true
 	return a, rec, log
@@ -257,7 +258,7 @@ func TestAgentLogsTraffic(t *testing.T) {
 	a.Do(actToggle, "Ctrl+Q")
 	a.Wait()
 	for _, want := range []string{
-		"toggle (Ctrl+Q), connecting to A00CE275632F",
+		"toggle (Ctrl+Q), connecting to OpenFit 2+ by Shokz at A00CE275632F",
 		"connected",
 		fmt.Sprintf("recv %2d bytes: % x", len(replySet), replySet),
 		"Dolby Audio on",

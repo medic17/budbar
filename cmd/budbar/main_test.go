@@ -6,9 +6,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
+
+	"openfit-dolby/bt"
+	"openfit-dolby/devices"
+	"openfit-dolby/devices/devicestest"
 )
+
+// useDevices makes added the device list run picks from, with every tested
+// device and two untested ones paired; none is connected.
+func useDevices(t *testing.T, added ...devices.Device) devices.Store {
+	oldStore, oldConnected := store, connected
+	t.Cleanup(func() { store, connected = oldStore, oldConnected })
+	store = devicestest.Store(t, devicestest.AllPaired, added...)
+	connected = func(uint64) (bool, error) { return false, nil }
+	return store
+}
 
 // noDial fails the test if run tries to connect.
 func noDial(t *testing.T) dialFunc {
@@ -19,17 +34,22 @@ func noDial(t *testing.T) dialFunc {
 }
 
 func TestBadInputNeverDials(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	for _, args := range [][]string{
 		{},
 		{"onn"},
 		{"ON"},
 		{"status", "extra"},
 		{"-x", "status"},
-		// There is no way to choose another device.
+		// Devices are added by name; there is no address option.
 		{"-addr", "A0:0C:E2:75:63:2F", "status"},
-		{"-addr", "11:22:33:44:55:66", "on"},
 		{"tray", "extra"},
 		{"install", "extra"},
+		{"devices", "extra"},
+		{"add"},
+		{"remove"},
+		{"-device", "shokz", "tray"},
+		{"-device", "shokz", "add", "bose"},
 	} {
 		var stderr strings.Builder
 		if code := run(args, noDial(t), io.Discard, &stderr); code != 2 {
@@ -48,6 +68,7 @@ func TestHelpNeverDials(t *testing.T) {
 }
 
 func TestDialErrorExits1(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	var stderr strings.Builder
 	dial := func(uint64) (io.ReadWriteCloser, error) { return nil, errors.New("connect: refused") }
 	if code := run([]string{"status"}, dial, io.Discard, &stderr); code != 1 {
@@ -92,6 +113,7 @@ func (f *fakeConn) Close() error {
 }
 
 func TestStatus(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	conn := &fakeConn{reply: replyGetOff}
 	var stdout, stderr strings.Builder
 	dial := func(uint64) (io.ReadWriteCloser, error) { return conn, nil }
@@ -107,6 +129,7 @@ func TestStatus(t *testing.T) {
 }
 
 func TestTraceLogsTrafficUnchanged(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	conn := &fakeConn{reply: replyGetOff}
 	var stdout, stderr strings.Builder
 	dial := func(uint64) (io.ReadWriteCloser, error) { return conn, nil }
@@ -118,7 +141,7 @@ func TestTraceLogsTrafficUnchanged(t *testing.T) {
 	}
 	log := stderr.String()
 	for _, want := range []string{
-		`command "status", connecting to A00CE275632F`,
+		`command "status", connecting to OpenFit 2+ by Shokz at A00CE275632F`,
 		"connected",
 		fmt.Sprintf("send %2d bytes: % x", len(conn.sent[0]), conn.sent[0]),
 		fmt.Sprintf("recv %2d bytes: % x", len(replyGetOff), replyGetOff),
@@ -131,6 +154,7 @@ func TestTraceLogsTrafficUnchanged(t *testing.T) {
 }
 
 func TestTraceLogsConnectFailure(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	var stderr strings.Builder
 	dial := func(uint64) (io.ReadWriteCloser, error) { return nil, errors.New("connect: refused") }
 	run([]string{"-trace", "status"}, dial, io.Discard, &stderr)
@@ -167,8 +191,9 @@ func TestNonDialingCommands(t *testing.T) {
 	}
 }
 
-// The CLI dials only the tested earbuds.
+// The CLI dials only the added earbuds.
 func TestDialsOnlyTheEarbuds(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	var dialed []uint64
 	dial := func(addr uint64) (io.ReadWriteCloser, error) {
 		dialed = append(dialed, addr)
@@ -177,12 +202,13 @@ func TestDialsOnlyTheEarbuds(t *testing.T) {
 	for _, cmd := range []string{"status", "off"} {
 		run([]string{cmd}, dial, io.Discard, io.Discard)
 	}
-	if fmt.Sprint(dialed) != fmt.Sprint([]uint64{earbudsAddr, earbudsAddr}) {
+	if fmt.Sprint(dialed) != fmt.Sprint([]uint64{devicestest.ShokzDevice.Addr, devicestest.ShokzDevice.Addr}) {
 		t.Errorf("dialed %x", dialed)
 	}
 }
 
 func TestNotConnectedExits1(t *testing.T) {
+	useDevices(t, devicestest.ShokzDevice)
 	var stderr strings.Builder
 	dial := func(uint64) (io.ReadWriteCloser, error) { return nil, errNotConnected }
 	if code := run([]string{"on"}, dial, io.Discard, &stderr); code != 1 {
@@ -190,5 +216,96 @@ func TestNotConnectedExits1(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "not connected to this PC") {
 		t.Errorf("stderr %q", stderr.String())
+	}
+}
+
+// Without a single added Shokz device to use, status, on and off exit 1
+// without dialing.
+func TestNoShokzChosenNeverDials(t *testing.T) {
+	second := devices.Device{Addr: 0xA00CE2750000, Model: devicestest.ShokzDevice.Model, Name: "OpenFit 2+ by Shokz"}
+	for _, tc := range []struct {
+		added []devices.Device
+		args  []string
+	}{
+		{nil, []string{"status"}},
+		{[]devices.Device{devicestest.BoseBudsDevice}, []string{"on"}},
+		{devicestest.AllTestedDevices, []string{"-device", "bose", "status"}},
+		{devicestest.AllTestedDevices, []string{"-device", "jbl", "off"}},
+	} {
+		useDevices(t, tc.added...)
+		var stderr strings.Builder
+		if code := run(tc.args, noDial(t), io.Discard, &stderr); code != 1 || stderr.Len() == 0 {
+			t.Errorf("%v %q: exit %d, stderr %q", tc.added, tc.args, code, stderr.String())
+		}
+	}
+	// Two added Shokz earbuds, neither connected: -device must pick one.
+	paired := append(slices.Clone(devicestest.AllPaired), bt.PairedDevice{
+		Addr: second.Addr, Name: second.Name, VendorID: devicestest.ShokzPaired.VendorID, Services: devicestest.ShokzPaired.Services,
+	})
+	oldStore, oldConnected := store, connected
+	t.Cleanup(func() { store, connected = oldStore, oldConnected })
+	store = devicestest.Store(t, paired, devicestest.ShokzDevice, second)
+	connected = func(uint64) (bool, error) { return false, nil }
+	var stderr strings.Builder
+	if code := run([]string{"status"}, noDial(t), io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), "-device") {
+		t.Errorf("two Shokz: exit %d, stderr %q", code, stderr.String())
+	}
+	var dialed []uint64
+	dial := func(addr uint64) (io.ReadWriteCloser, error) {
+		dialed = append(dialed, addr)
+		return &fakeConn{reply: replyGetOff}, nil
+	}
+	if code := run([]string{"-device", "A0:0C:E2:75:00:00", "status"}, dial, io.Discard, io.Discard); code != 0 || fmt.Sprint(dialed) != fmt.Sprint([]uint64{second.Addr}) {
+		t.Errorf("-device by address: exit %d, dialed %X", code, dialed)
+	}
+}
+
+func TestDevicesAddRemove(t *testing.T) {
+	s := useDevices(t)
+	runOK := func(args ...string) string {
+		t.Helper()
+		var stdout, stderr strings.Builder
+		if code := run(args, noDial(t), &stdout, &stderr); code != 0 {
+			t.Fatalf("%q: exit %d, stderr %q", args, code, stderr.String())
+		}
+		return stdout.String()
+	}
+	runFails := func(want string, args ...string) {
+		t.Helper()
+		var stderr strings.Builder
+		if code := run(args, noDial(t), io.Discard, &stderr); code != 1 || !strings.Contains(stderr.String(), want) {
+			t.Errorf("%q: exit %d, stderr %q; want exit 1 mentioning %q", args, code, stderr.String(), want)
+		}
+	}
+
+	out := runOK("devices")
+	want := `Added:
+  (none)
+Can be added (paired, of a tested model):
+  Bose QC Ultra 2 Earbuds  68:F2:1F:3B:5C:B7  Bose QC Ultra Earbuds (2nd Gen)
+  Bose QC Ultra 2 HP       68:F2:1F:0D:F0:42  Bose QC Ultra Headphones (2nd Gen)
+  OpenFit 2+ by Shokz      A0:0C:E2:75:63:2F  Shokz OpenFit 2+
+`
+	if out != want {
+		t.Errorf("devices:\n%s\nwant:\n%s", out, want)
+	}
+
+	runFails("2 devices match", "add", "bose")
+	runFails("no paired device of a tested model", "add", "jbl")
+	if out := runOK("add", "openfit"); !strings.Contains(out, "added   OpenFit 2+ by Shokz  A0:0C:E2:75:63:2F") {
+		t.Errorf("add: %q", out)
+	}
+	runFails("no paired device of a tested model", "add", "openfit")
+	runOK("add", "bose", "headphones")
+	if list, _ := s.Load(); fmt.Sprint(list) != fmt.Sprint([]devices.Device{devicestest.ShokzDevice, devicestest.BoseHPDevice}) {
+		t.Errorf("after adding: %v", list)
+	}
+
+	runFails("no added device", "remove", "earbuds")
+	if out := runOK("remove", "shokz"); !strings.Contains(out, "removed OpenFit 2+ by Shokz") {
+		t.Errorf("remove: %q", out)
+	}
+	if list, _ := s.Load(); fmt.Sprint(list) != fmt.Sprint([]devices.Device{devicestest.BoseHPDevice}) {
+		t.Errorf("after removing: %v", list)
 	}
 }

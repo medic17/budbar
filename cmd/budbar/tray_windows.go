@@ -18,6 +18,8 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -26,6 +28,8 @@ import (
 	"golang.org/x/sys/windows"
 
 	"openfit-dolby/bose"
+	"openfit-dolby/bt"
+	"openfit-dolby/devices"
 )
 
 var (
@@ -65,7 +69,8 @@ const (
 	wmHotkey      = 0x0312
 	wmApp         = 0x8000
 	wmTray        = wmApp + 1 // tray icon callback
-	wmRefresh     = wmApp + 2 // the agent published a new status
+	wmRefresh     = wmApp + 2 // an agent published a new status
+	wmResumeCheck = wmApp + 3 // time to check the connections after resume
 
 	ninSelect    = 0x0400
 	ninKeySelect = 0x0401
@@ -82,6 +87,7 @@ const (
 
 	mfString    = 0x0000
 	mfGrayed    = 0x0001
+	mfPopup     = 0x0010
 	mfSeparator = 0x0800
 	tpmFlags    = 0x0100 | 0x0002 | 0x0080 | 0x0020 // RETURNCMD|RIGHTBUTTON|NONOTIFY|BOTTOMALIGN
 
@@ -98,6 +104,7 @@ const (
 	cmdOpenLog      = 4
 	cmdExit         = 5
 	cmdRefreshModes = 6
+	cmdAddDevice    = 100 // + index in the Add device submenu
 
 	wmSettingChange = 0x001A // also sent when the light/dark theme changes
 )
@@ -172,13 +179,17 @@ type boseIconKey struct {
 	dark, dim bool
 }
 
-// The tray shows one device at a time: a connected Bose device (the one that
-// connected last, if both are), otherwise the Shokz Dolby state as before.
-// The Shokz and a Bose device are not connected to this PC at once.
+// The tray shows one device at a time: of the connected ones, the one that
+// connected last; while none is, the first Shokz earbuds' Dolby state.
+// It keeps one agent per device in devices.json and rereads the file at
+// startup, when its menu opens and on every Bluetooth event, so devices
+// added or removed with the CLI take effect without a restart.
 type tray struct {
 	hwnd           windows.HWND
-	agent          *agent
-	bose           []*boseAgent // one per device in bose.Devices
+	dial           dialFunc // for the Shokz agents
+	shokz          []*agent
+	bose           []*boseAgent
+	retired        []func() // waits for agents of removed devices
 	log            *appLog
 	taskbarCreated uint32
 	icons          map[iconKey]windows.Handle
@@ -188,8 +199,7 @@ type tray struct {
 	radio          windows.Handle
 
 	mu     sync.Mutex
-	status Status
-	shown  boseShown
+	recent lastConnected
 }
 
 // theTray is the single instance the window procedure dispatches to; Windows
@@ -208,37 +218,31 @@ func runTray(dial dialFunc, stderr io.Writer) int {
 	log := openAppLog(os.Stderr)
 	defer log.Close()
 
-	t := &tray{log: log}
+	t := &tray{log: log, dial: dial}
 	theTray = t
-	t.agent = newAgent(dial, earbudsConnected, log, t.SetStatus)
-	boseAddrs := ""
-	for _, d := range bose.Devices {
-		probe := func() (bool, error) { return bose.Connected(d.Addr) }
-		publish := func(s BoseStatus) { t.SetBoseStatus(d.Addr, s) }
-		t.bose = append(t.bose, newBoseAgent(d, bose.Dial, probe, log, publish))
-		boseAddrs += fmt.Sprintf(", %v %012X", d, d.Addr)
-	}
 	if err := t.create(); err != nil {
 		t.logf("tray setup failed: %v", err)
 		fmt.Fprintln(stderr, "budbar: tray setup failed:", err)
 		return 1
 	}
-	t.logf("tray started (pid %d, Shokz %012X%s, dark taskbar %t)",
-		os.Getpid(), earbudsAddr, boseAddrs, t.dark)
+	t.logf("tray started (pid %d, devices from %s, dark taskbar %t)", os.Getpid(), store.Path, t.dark)
 	if t.hotkeyErr != nil {
 		t.logf("Ctrl+Q not available: %v", t.hotkeyErr)
 	}
-	t.agent.Check("startup")
-	for _, b := range t.bose {
-		b.Check("startup")
-	}
+	t.syncDevices("startup")
+	t.refresh()
 	t.loop()
 	for _, b := range t.bose {
 		b.Stop()
 	}
-	t.agent.Wait()
+	for _, a := range t.shokz {
+		a.Wait()
+	}
 	for _, b := range t.bose {
 		b.Wait()
+	}
+	for _, wait := range t.retired {
+		wait()
 	}
 	t.logf("tray exited")
 	return 0
@@ -263,22 +267,74 @@ func claimSingleInstance() bool {
 	return true
 }
 
-// SetStatus is called from the agent's goroutines. It only stashes the
-// status and pokes the window; all Shell_NotifyIcon calls happen on the
-// thread that owns the icon.
-func (t *tray) SetStatus(s Status) {
+// published is called from the agents' goroutines with each new status. It
+// only records whether the device is connected and pokes the window; all
+// Shell_NotifyIcon calls happen on the thread that owns the icon.
+func (t *tray) published(addr uint64, connected bool) {
 	t.mu.Lock()
-	t.status = s
+	t.recent.set(addr, connected)
 	t.mu.Unlock()
 	procPostMessageW.Call(uintptr(t.hwnd), wmRefresh, 0, 0)
 }
 
-// SetBoseStatus is SetStatus for the agent of the Bose device at addr.
-func (t *tray) SetBoseStatus(addr uint64, s BoseStatus) {
-	t.mu.Lock()
-	t.shown.set(addr, s)
-	t.mu.Unlock()
-	procPostMessageW.Call(uintptr(t.hwnd), wmRefresh, 0, 0)
+// syncDevices starts an agent for each device in devices.json that has none
+// and stops those of devices no longer in it. It runs on the window's
+// thread.
+func (t *tray) syncDevices(why string) {
+	list, err := store.Load()
+	if err != nil {
+		t.logf("reading the device list (%s): %v", why, err)
+		return
+	}
+	listed := map[uint64]bool{}
+	for _, d := range list {
+		listed[d.Addr] = true
+		if t.agentFor(d.Addr) {
+			continue
+		}
+		switch d.Kind() {
+		case devices.Shokz:
+			a := newAgent(d, t.dial, func() (bool, error) { return bt.Connected(d.Addr) }, t.log,
+				func(s Status) { t.published(d.Addr, s.Connected) })
+			t.shokz = append(t.shokz, a)
+			t.logf("watching %v %012X (%s)", d, d.Addr, why)
+			a.Check(why)
+		case devices.Bose:
+			b := newBoseAgent(d, bose.Dial, func() (bool, error) { return bose.Connected(d.Addr) }, t.log,
+				func(s BoseStatus) { t.published(d.Addr, s.Connected) })
+			t.bose = append(t.bose, b)
+			t.logf("watching %v %012X (%s)", d, d.Addr, why)
+			b.Check(why)
+		default:
+			t.logf("ignoring %v %012X: unknown model %q", d, d.Addr, d.Model)
+		}
+	}
+	t.shokz = slices.DeleteFunc(t.shokz, func(a *agent) bool {
+		if listed[a.dev.Addr] {
+			return false
+		}
+		t.logf("%v %012X removed from the device list", a.dev, a.dev.Addr)
+		a.Disconnected("removed")
+		t.retired = append(t.retired, a.Wait)
+		t.published(a.dev.Addr, false)
+		return true
+	})
+	t.bose = slices.DeleteFunc(t.bose, func(b *boseAgent) bool {
+		if listed[b.dev.Addr] {
+			return false
+		}
+		t.logf("%v %012X removed from the device list", b.dev, b.dev.Addr)
+		b.Stop()
+		t.retired = append(t.retired, b.Wait)
+		t.published(b.dev.Addr, false)
+		return true
+	})
+}
+
+// agentFor reports whether a device at addr has an agent.
+func (t *tray) agentFor(addr uint64) bool {
+	return slices.ContainsFunc(t.shokz, func(a *agent) bool { return a.dev.Addr == addr }) ||
+		slices.ContainsFunc(t.bose, func(b *boseAgent) bool { return b.dev.Addr == addr })
 }
 
 // create makes the window, icons, hotkey and Bluetooth registration. It must
@@ -348,38 +404,67 @@ func (t *tray) create() error {
 	return nil
 }
 
-func (t *tray) current() Status {
+// shown returns the agent of the device the tray shows: the connected one
+// that connected last, else the first Shokz earbuds. At most one is non-nil;
+// both are nil when no device is connected and no Shokz earbuds are added.
+func (t *tray) shown() (*agent, *boseAgent) {
 	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.status
-}
-
-// currentBose returns the agent and status of the Bose device the tray
-// shows, or a nil agent while none is connected.
-func (t *tray) currentBose() (*boseAgent, BoseStatus) {
-	t.mu.Lock()
-	addr, s, ok := t.shown.current()
+	addr, ok := t.recent.latest()
 	t.mu.Unlock()
 	if ok {
-		for _, a := range t.bose {
+		for _, a := range t.shokz {
 			if a.dev.Addr == addr {
-				return a, s
+				return a, nil
+			}
+		}
+		for _, b := range t.bose {
+			if b.dev.Addr == addr {
+				return nil, b
 			}
 		}
 	}
-	return nil, BoseStatus{}
+	if len(t.shokz) > 0 {
+		return t.shokz[0], nil
+	}
+	return nil, nil
+}
+
+// shokzTarget is the earbuds that Turn on, Turn off and Ctrl+Q act on: the
+// shown ones, else the first connected Shokz earbuds, else nil.
+func (t *tray) shokzTarget() *agent {
+	if a, _ := t.shown(); a != nil && a.Status().Connected {
+		return a
+	}
+	for _, a := range t.shokz {
+		if a.Status().Connected {
+			return a
+		}
+	}
+	return nil
 }
 
 // look returns the icon and the two text lines for the device the tray
-// shows: a connected Bose device, otherwise the Shokz.
+// shows.
 func (t *tray) look() (icon windows.Handle, head, detail string) {
-	if a, b := t.currentBose(); a != nil {
-		return t.boseIcons[boseIconKey{t.dark, b.Failed}], boseHeadline(a.dev, b), b.Detail
+	a, b := t.shown()
+	switch {
+	case b != nil:
+		s := b.Status()
+		return t.boseIcons[boseIconKey{t.dark, s.Failed}], boseHeadline(b.dev, s), s.Detail
+	case a != nil:
+		s := a.Status()
+		return t.icons[iconKey{s.State, s.Busy}], headline(s), detailLine(s)
 	}
-	s := t.current()
-	return t.icons[iconKey{s.State, s.Busy}], headline(s), detailLine(s)
+	grey := t.icons[iconKey{stateUnknown, false}]
+	if len(t.bose) == 0 {
+		return grey, "No devices added", "right-click to add one"
+	}
+	var names []string
+	for _, b := range t.bose {
+		names = append(names, b.dev.Name)
+	}
+	return grey, "Not connected", strings.Join(names, ", ")
 }
-
 func (t *tray) nid() notifyIconData {
 	var n notifyIconData
 	n.Size = uint32(unsafe.Sizeof(n))
@@ -433,7 +518,7 @@ func detailLine(s Status) string {
 
 // boseHeadline is a Bose device's first line: its name and, once read, its
 // mode.
-func boseHeadline(dev bose.Device, b BoseStatus) string {
+func boseHeadline(dev devices.Device, b BoseStatus) string {
 	if b.Mode == "" {
 		return dev.String() + ": reading..."
 	}
@@ -441,15 +526,24 @@ func boseHeadline(dev bose.Device, b BoseStatus) string {
 }
 
 func (t *tray) showMenu(x, y int32) {
-	s := t.current()
-	ba, _ := t.currentBose()
+	t.syncDevices("menu")
+	target := t.shokzTarget()
+	var s Status
+	if target != nil {
+		s = target.Status()
+	}
+	_, ba := t.shown()
 	_, head, detail := t.look()
+	cands, candErr := store.Candidates()
+	if candErr != nil {
+		t.logf("listing devices to add: %v", candErr)
+	}
 
 	m, _, _ := procCreatePopupMenu.Call()
-	defer procDestroyMenu.Call(m)
-	add := func(flags uint32, id uintptr, text string) {
+	defer procDestroyMenu.Call(m) // also destroys the submenu
+	add := func(menu uintptr, flags uint32, id uintptr, text string) {
 		p, _ := windows.UTF16PtrFromString(text)
-		procAppendMenuW.Call(m, uintptr(flags), id, uintptr(unsafe.Pointer(p)))
+		procAppendMenuW.Call(menu, uintptr(flags), id, uintptr(unsafe.Pointer(p)))
 	}
 	enabled := func(ok bool) uint32 {
 		if ok {
@@ -457,49 +551,69 @@ func (t *tray) showMenu(x, y int32) {
 		}
 		return mfString | mfGrayed
 	}
-	add(mfString|mfGrayed, 0, head)
-	add(mfString|mfGrayed, 0, detail)
+	add(m, mfString|mfGrayed, 0, head)
+	add(m, mfString|mfGrayed, 0, detail)
 	if t.hotkeyErr != nil {
-		add(mfString|mfGrayed, 0, "Ctrl+Q not available (see log)")
+		add(m, mfString|mfGrayed, 0, "Ctrl+Q not available (see log)")
 	}
-	add(mfSeparator, 0, "")
-	ready := s.Connected && !s.Busy
-	add(enabled(ready && s.State != stateOn), cmdTurnOn, "Turn on")
-	add(enabled(ready && s.State != stateOff), cmdTurnOff, "Turn off")
-	add(enabled(ready || ba != nil), cmdRefresh, "Refresh")
-	add(enabled(ba != nil), cmdRefreshModes, "Refresh modes")
-	add(mfString, cmdOpenLog, "Open log")
-	add(mfSeparator, 0, "")
-	add(mfString, cmdExit, "Exit")
+	add(m, mfSeparator, 0, "")
+	if len(t.shokz) > 0 {
+		ready := target != nil && !s.Busy
+		add(m, enabled(ready && s.State != stateOn), cmdTurnOn, "Turn on")
+		add(m, enabled(ready && s.State != stateOff), cmdTurnOff, "Turn off")
+	}
+	add(m, enabled(ba != nil || (target != nil && !s.Busy)), cmdRefresh, "Refresh")
+	if len(t.bose) > 0 {
+		add(m, enabled(ba != nil), cmdRefreshModes, "Refresh modes")
+	}
+	sub, _, _ := procCreatePopupMenu.Call()
+	switch {
+	case candErr != nil:
+		add(sub, mfString|mfGrayed, 0, "Can't list paired devices (see log)")
+	case len(cands) == 0:
+		add(sub, mfString|mfGrayed, 0, "No other paired device of a tested model")
+	}
+	for i, d := range cands {
+		mod, _ := devices.ModelByID(d.Model)
+		add(sub, mfString, cmdAddDevice+uintptr(i), d.Name+"  ("+mod.Name+")")
+	}
+	add(m, mfPopup, sub, "Add device")
+	add(m, mfString, cmdOpenLog, "Open log")
+	add(m, mfSeparator, 0, "")
+	add(m, mfString, cmdExit, "Exit")
 
 	// Without this the menu doesn't close when you click elsewhere.
 	procSetForegroundWindow.Call(uintptr(t.hwnd))
 	cmd, _, _ := procTrackPopupMenu.Call(m, tpmFlags, uintptr(x), uintptr(y), 0, uintptr(t.hwnd), 0)
 	procPostMessageW.Call(uintptr(t.hwnd), wmNull, 0, 0)
 
-	switch cmd {
-	case cmdTurnOn:
-		t.agent.Do(actOn, "menu")
-	case cmdTurnOff:
-		t.agent.Do(actOff, "menu")
-	case cmdRefresh:
-		if ba != nil {
-			ba.Refresh("menu", false)
+	switch {
+	case cmd == cmdTurnOn && target != nil:
+		target.Do(actOn, "menu")
+	case cmd == cmdTurnOff && target != nil:
+		target.Do(actOff, "menu")
+	case cmd == cmdRefresh && ba != nil:
+		ba.Refresh("menu", false)
+	case cmd == cmdRefresh && target != nil:
+		target.Do(actRefresh, "menu")
+	case cmd == cmdRefreshModes && ba != nil:
+		ba.Refresh("menu: refresh modes", true)
+	case cmd >= cmdAddDevice && cmd < cmdAddDevice+uintptr(len(cands)):
+		d := cands[cmd-cmdAddDevice]
+		if err := store.Add(d); err != nil {
+			t.logf("menu: adding %v %012X failed: %v", d, d.Addr, err)
 		} else {
-			t.agent.Do(actRefresh, "menu")
+			t.logf("menu: added %v %012X (%s)", d, d.Addr, d.Model)
 		}
-	case cmdRefreshModes:
-		if ba != nil {
-			ba.Refresh("menu: refresh modes", true)
-		}
-	case cmdOpenLog:
+		t.syncDevices("added")
+		t.refresh()
+	case cmd == cmdOpenLog:
 		openLog()
-	case cmdExit:
+	case cmd == cmdExit:
 		t.logf("menu: exit")
 		procDestroyWindow.Call(uintptr(t.hwnd))
 	}
 }
-
 func openLog() {
 	verb, _ := windows.UTF16PtrFromString("open")
 	file, _ := windows.UTF16PtrFromString(logPath())
@@ -507,9 +621,9 @@ func openLog() {
 }
 
 // onDeviceChange handles the radio's Bluetooth events. Every HCI event is
-// logged with what BluetoothGetDeviceInfo reports for the Shokz at that
-// moment. Each device's ACL connect schedules a read; its disconnect shows
-// it as not connected.
+// logged, with what BluetoothGetDeviceInfo reports at that moment for an
+// added device. Each added device's ACL connect schedules a read; its
+// disconnect shows it as not connected.
 func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 	if wparam != dbtCustomEvent || lparam == 0 {
 		return
@@ -520,17 +634,24 @@ func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 	if !ok {
 		return
 	}
-	now, err := earbudsConnected()
-	t.logf("bluetooth: %012X type %d connected=%t (Shokz connected per Windows: %t, err=%v)",
+	t.syncDevices("bluetooth event")
+	if !t.agentFor(ev.Addr) {
+		t.logf("bluetooth: %012X type %d connected=%t (not an added device)", ev.Addr, ev.ConnType, ev.Connected)
+		return
+	}
+	now, err := bt.Connected(ev.Addr)
+	t.logf("bluetooth: %012X type %d connected=%t (connected per Windows: %t, err=%v)",
 		ev.Addr, ev.ConnType, ev.Connected, now, err)
 	if ev.ConnType != hciConnTypeACL {
 		return
 	}
-	switch {
-	case ev.Addr == earbudsAddr && ev.Connected:
-		t.agent.Connected("earbuds connected", connectSettle)
-	case ev.Addr == earbudsAddr:
-		t.agent.Disconnected("disconnected")
+	for _, a := range t.shokz {
+		switch {
+		case ev.Addr == a.dev.Addr && ev.Connected:
+			a.Connected(a.dev.Name+" connected", connectSettle)
+		case ev.Addr == a.dev.Addr:
+			a.Disconnected("disconnected")
+		}
 	}
 	for _, b := range t.bose {
 		switch {
@@ -543,22 +664,32 @@ func (t *tray) onDeviceChange(wparam, lparam uintptr) {
 }
 
 // onPower greys the icon before sleep or hibernate and checks the
-// connection again after resume, since events during sleep are lost.
+// connections again after resume, since events during sleep are lost.
 func (t *tray) onPower(wparam uintptr) {
 	switch wparam {
 	case pbtAPMSuspend:
-		t.agent.Disconnected("sleep")
+		for _, a := range t.shokz {
+			a.Disconnected("sleep")
+		}
 		for _, b := range t.bose {
 			b.Disconnected("sleep")
 		}
 	case pbtAPMResumeAutomatic:
 		t.logf("resumed; checking the connections in %s", resumeSettle)
+		// Check on the window's thread, which owns the agent lists.
 		time.AfterFunc(resumeSettle, func() {
-			t.agent.Check("resume")
-			for _, b := range t.bose {
-				b.Check("resume")
-			}
+			procPostMessageW.Call(uintptr(t.hwnd), wmResumeCheck, 0, 0)
 		})
+	}
+}
+
+// resumeCheck asks Windows about every device's connection after resume.
+func (t *tray) resumeCheck() {
+	for _, a := range t.shokz {
+		a.Check("resume")
+	}
+	for _, b := range t.bose {
+		b.Check("resume")
 	}
 }
 
@@ -601,7 +732,14 @@ func wndProc(hwnd windows.HWND, msg uint32, wparam, lparam uintptr) uintptr {
 		t.refresh()
 		return 0
 	case msg == wmHotkey && wparam == hotkeyID:
-		t.agent.Do(actToggle, "Ctrl+Q")
+		if a := t.shokzTarget(); a != nil {
+			a.Do(actToggle, "Ctrl+Q")
+		} else {
+			t.logf("toggle (Ctrl+Q) ignored: no Shokz earbuds connected")
+		}
+		return 0
+	case msg == wmResumeCheck:
+		t.resumeCheck()
 		return 0
 	case msg == wmDeviceChange:
 		t.onDeviceChange(wparam, lparam)

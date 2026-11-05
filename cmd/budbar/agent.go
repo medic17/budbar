@@ -10,6 +10,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"openfit-dolby/bt"
+	"openfit-dolby/devices"
 	"openfit-dolby/shokz"
 )
 
@@ -65,11 +66,12 @@ func (a action) String() string {
 	return fmt.Sprintf("action(%d)", int(a))
 }
 
-// agent runs the tray's actions, one at a time and only while the earbuds
-// are connected to this PC. Each action opens its own connection and Client
-// and closes it when done, so it sends at most one set request and never
-// holds the earbuds' only connection while idle.
+// agent runs the tray's actions on one pair of Shokz earbuds, one at a time
+// and only while they are connected to this PC. Each action opens its own
+// connection and Client and closes it when done, so it sends at most one set
+// request and never holds the earbuds' only connection while idle.
 type agent struct {
+	dev     devices.Device
 	dial    dialFunc
 	probe   func() (bool, error) // whether the earbuds are connected
 	log     io.Writer            // gets the -trace output of every action
@@ -82,8 +84,8 @@ type agent struct {
 	running        sync.WaitGroup
 }
 
-func newAgent(dial dialFunc, probe func() (bool, error), log io.Writer, publish func(Status)) *agent {
-	return &agent{dial: dial, probe: probe, log: log, publish: publish, now: time.Now}
+func newAgent(dev devices.Device, dial dialFunc, probe func() (bool, error), log io.Writer, publish func(Status)) *agent {
+	return &agent{dev: dev, dial: dial, probe: probe, log: log, publish: publish, now: time.Now}
 }
 
 func (a *agent) clock() string { return a.now().Format("15:04") }
@@ -203,8 +205,8 @@ func (a *agent) Wait() { a.running.Wait() }
 
 func (a *agent) perform(act action, why string) Status {
 	tr := bt.NewTracer(a.log)
-	tr.Logf("%s (%s), connecting to %012X", act, why, earbudsAddr)
-	conn, err := a.dial(earbudsAddr)
+	tr.Logf("%s (%s), connecting to %v at %012X", act, why, a.dev, a.dev.Addr)
+	conn, err := a.dial(a.dev.Addr)
 	if err != nil {
 		tr.Logf("connect failed: %v", err)
 		return a.failed(err)
